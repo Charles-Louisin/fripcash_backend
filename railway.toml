@@ -1,0 +1,7 @@
+[build]
+builder = "RAILPACK"
+buildCommand = "npm install --include=dev && npm run build"
+
+[deploy]
+startCommand = "node dist/index.js"
+restartPolicyType = "ON_FAILURE"
