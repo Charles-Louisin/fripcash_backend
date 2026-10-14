@@ -1,5 +1,6 @@
 import type { User } from "./models/user.js";
 import { sid } from "./utils/ids.js";
+import { publicMediaUrl } from "./utils/public-url.js";
 import {
   allowedDestinations,
   computeCapabilities,
@@ -137,7 +138,7 @@ export function toListing(
       id: sid(m._id),
       listingId: sid(doc._id),
       storageKey: m.storageKey,
-      url: m.url,
+      url: publicMediaUrl(m.url) || publicMediaUrl(m.storageKey) || m.url || null,
       mimeType: m.mimeType,
       sortOrder: m.sortOrder,
     })),
@@ -169,18 +170,36 @@ export function toListing(
 
 export function toOrder(doc: any, extras: Record<string, unknown> = {}) {
   const first = doc.items?.[0];
+  const images = [
+    ...new Set(
+      (Array.isArray(extras.images) ? extras.images : [])
+        .map((url) => (typeof url === "string" ? publicMediaUrl(url) || url : ""))
+        .filter((url): url is string => !!url)
+    ),
+  ];
   const listing = first
-    ? { id: first.listingId ? sid(first.listingId) : null, title: first.title }
-    : { title: "Article" };
+    ? {
+        id: first.listingId ? sid(first.listingId) : null,
+        title: first.title,
+        images,
+        media: images.map((url) => ({ url })),
+      }
+    : { title: "Article", images, media: images.map((url) => ({ url })) };
   return {
     id: sid(doc._id),
     _id: sid(doc._id),
     buyerId: sid(doc.buyerId),
     sellerId: sid(doc.sellerId),
     courierId: doc.courierId ? sid(doc.courierId) : null,
-    listing,
-    article: listing,
-    items: doc.items,
+    items: (doc.items || []).map((item: any) => ({
+      listingId: item.listingId ? sid(item.listingId) : null,
+      title: item.title,
+      quantity: item.quantity,
+      priceGnf: item.priceGnf,
+      netPriceGnf: item.netPriceGnf,
+      commissionGnf: item.commissionGnf,
+      imageUrl: publicMediaUrl(item.imageUrl) || "",
+    })),
     amountGnf: doc.amountGnf,
     amount: doc.amountGnf,
     totalGnf: doc.amountGnf,
@@ -189,7 +208,12 @@ export function toOrder(doc: any, extras: Record<string, unknown> = {}) {
     commissionGnf: doc.commissionGnf,
     commission: doc.commissionGnf,
     status: doc.status,
-    escrowStatus: doc.escrowStatus === "held" ? "blocked" : doc.escrowStatus,
+    escrowStatus:
+      doc.escrowStatus === "held" ||
+      doc.escrowStatus === "payout_pending" ||
+      doc.escrowStatus === "refund_pending"
+        ? "blocked"
+        : doc.escrowStatus,
     fulfillmentMode: doc.fulfillmentMode,
     paymentMethod: doc.paymentMethod,
     pickupCode: null,
@@ -205,6 +229,9 @@ export function toOrder(doc: any, extras: Record<string, unknown> = {}) {
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
     ...extras,
+    images,
+    listing,
+    article: listing,
   };
 }
 

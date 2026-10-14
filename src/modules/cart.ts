@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { Cart, Order } from "../models/commerce.js";
+import { Cart, Order, Payment } from "../models/commerce.js";
 import { Listing } from "../models/listing.js";
 import { User } from "../models/user.js";
 import { requireAuth, requireAudience, type AuthedRequest } from "../middleware/auth.js";
@@ -9,10 +9,25 @@ import { ah } from "../utils/async-handler.js";
 import { badRequest, notFound } from "../utils/http-error.js";
 import { param, sid } from "../utils/ids.js";
 import { fulfillmentForShopKind } from "../utils/pricing.js";
-import { notifyOrderParties } from "../services/notify.js";
 import { DeliveryTariff } from "../models/catalog.js";
-import { holdEscrow } from "../services/wallet.js";
 import { hydrateOrder } from "../services/orders-hydrate.js";
+import { publicMediaUrl } from "../utils/public-url.js";
+import { isValidEmail, parseGnMobile, splitPersonName } from "../services/gn-phone.js";
+import {
+  cinetpayNotifyUrl,
+  cinetpayReturnUrls,
+  initCinetPayPayment,
+  isFinalFailure,
+  isFinalSuccess,
+  throwIfHardFailure,
+  type CinetPayMethod,
+} from "../services/cinetpay.js";
+import {
+  MIN_PAYMENT_GNF,
+  paymentPublicView,
+  restoreReservedStock,
+  settleInboundPayment,
+} from "../services/payments.js";
 
 export const cartRouter = Router();
 cartRouter.use(requireAuth, requireAudience("CONSUMER"));
@@ -122,14 +137,64 @@ cartRouter.delete(
 
 export const checkoutRouter = Router();
 
+const checkoutSchema = z.object({
+  fulfillmentMode: z.enum(["courier", "pickup", "shopLocalDelivery"]).optional(),
+  paymentMethod: z.enum(["OM_GN", "MTN_GN", "CINETPAY"]),
+  address: z.string().min(3),
+  city: z.string().optional(),
+  phone: z.string().min(8),
+  name: z.string().min(2),
+  email: z.string().email("Adresse e-mail invalide"),
+  mobileNumber: z.string().optional(),
+  shippingCostGnf: z.number().optional(),
+  toZoneId: z.string().optional(),
+  zoneId: z.string().optional(),
+  offerAmountGnf: z.number().optional(),
+});
+
 checkoutRouter.post(
   "/",
   requireAuth,
   requireAudience("CONSUMER"),
+  validate(checkoutSchema),
   ah(async (req, res) => {
     const user = (req as AuthedRequest).userDoc!;
     const cart = await Cart.findOne({ userId: user._id });
     if (!cart || cart.items.length === 0) throw badRequest("EMPTY_CART", "Panier vide");
+
+    const body = req.body as z.infer<typeof checkoutSchema>;
+    const method = body.paymentMethod as CinetPayMethod;
+    const deliveryPhone = parseGnMobile(body.phone);
+    if (!deliveryPhone) {
+      throw badRequest(
+        "PHONE",
+        "Le numéro de livraison doit être un mobile guinéen Orange (62) ou MTN (65)."
+      );
+    }
+    if (!isValidEmail(body.email)) {
+      throw badRequest("EMAIL", "Adresse e-mail invalide.");
+    }
+
+    let payPhone = deliveryPhone;
+    if (method === "OM_GN" || method === "MTN_GN") {
+      const raw = body.mobileNumber || body.phone;
+      const parsed = parseGnMobile(raw);
+      if (!parsed) {
+        throw badRequest(
+          "MOBILE_MONEY",
+          "Numéro Mobile Money guinéen invalide (Orange 62 ou MTN 65, 9 chiffres)."
+        );
+      }
+      if (parsed.operator !== method) {
+        throw badRequest(
+          "OPERATOR",
+          method === "OM_GN"
+            ? "Ce numéro n'est pas un Orange Money guinéen (préfixe 62)."
+            : "Ce numéro n'est pas un MTN MoMo guinéen (préfixe 65)."
+        );
+      }
+      payPhone = parsed;
+    }
 
     const merged = new Map<string, { listing: any; quantity: number }>();
     for (const item of cart.items) {
@@ -153,9 +218,6 @@ checkoutRouter.post(
       bySeller.set(key, arr);
     }
 
-    const body = req.body || {};
-    const orders = [];
-
     async function resolveShipping(fulfillment: string, listing: any) {
       if (fulfillment === "pickup") return 0;
       if (Number(body.shippingCostGnf) > 0) return Number(body.shippingCostGnf);
@@ -168,84 +230,194 @@ checkoutRouter.post(
       return 0;
     }
 
-    for (const [sellerId, lines] of bySeller) {
-      const seller = await User.findById(sellerId);
-      const fulfillment =
-        body.fulfillmentMode || fulfillmentForShopKind(seller?.seller?.shopKind);
-      const items = lines.map(({ listing, quantity }) => ({
-        listingId: listing._id,
-        title: listing.title,
-        quantity,
-        priceGnf: listing.priceGnf,
-        netPriceGnf: listing.netPriceGnf,
-        commissionGnf: listing.commissionAmountGnf * quantity,
-      }));
-      const originalAmountGnf = items.reduce((s, i) => s + i.priceGnf * i.quantity, 0);
-      const commissionGnf = items.reduce((s, i) => s + i.commissionGnf, 0);
-      const netTotal = items.reduce((s, i) => s + i.netPriceGnf * i.quantity, 0);
-      const shippingCostGnf = await resolveShipping(fulfillment, lines[0].listing);
-      const pickupZoneId = lines[0].listing.zoneId || body.toZoneId || body.zoneId || null;
-      const negotiable = lines.some((l) => l.listing.negotiable === true);
-      const requestedOffer = Number(body.offerAmountGnf);
-      const hasOffer =
-        negotiable && Number.isFinite(requestedOffer) && requestedOffer > 0;
-      const offerAmountGnf = hasOffer ? Math.round(requestedOffer) : null;
-      const amountGnf = hasOffer ? offerAmountGnf! : originalAmountGnf;
-      const scale = originalAmountGnf > 0 ? amountGnf / originalAmountGnf : 1;
-      const escrowNet = Math.round(netTotal * scale);
+    const createdOrders: any[] = [];
+    const reservedLines: Array<{ listingId: unknown; quantity: number }> = [];
+    let shippingAssigned = false;
 
-      const order = await Order.create({
-        buyerId: user._id,
-        sellerId,
-        items,
-        amountGnf,
-        originalAmountGnf,
-        offerAmountGnf,
-        offerStatus: hasOffer ? "pending" : "none",
-        commissionGnf,
-        shippingCostGnf,
-        status: "SELLER_NOTIFIED",
-        escrowStatus: "held",
-        fulfillmentMode: fulfillment,
-        paymentMethod: body.paymentMethod || "orange_money",
-        pickupCode: null,
-        pickupZoneId,
-        address: {
-          line: body.address,
-          city: body.city,
-          phone: body.phone,
-          name: body.name,
-        },
-        timeline: [
-          { status: "ORDERED", at: new Date() },
-          {
-            status: "PAID",
-            at: new Date(),
-            note: hasOffer
-              ? `Paiement simulé (offre ${offerAmountGnf} GNF en attente)`
-              : "Paiement simulé",
+    try {
+      for (const [sellerId, lines] of bySeller) {
+        const seller = await User.findById(sellerId);
+        const fulfillment =
+          body.fulfillmentMode || fulfillmentForShopKind(seller?.seller?.shopKind);
+        const items = lines.map(({ listing, quantity }) => {
+          const cover = [...(listing.media || [])].sort(
+            (a: { sortOrder?: number }, b: { sortOrder?: number }) =>
+              (a.sortOrder ?? 0) - (b.sortOrder ?? 0)
+          )[0];
+          return {
+            listingId: listing._id,
+            title: listing.title,
+            quantity,
+            priceGnf: listing.priceGnf,
+            netPriceGnf: listing.netPriceGnf,
+            commissionGnf: listing.commissionAmountGnf * quantity,
+            imageUrl:
+              publicMediaUrl(cover?.url) ||
+              publicMediaUrl(cover?.storageKey) ||
+              cover?.url ||
+              "",
+          };
+        });
+        const originalAmountGnf = items.reduce((s, i) => s + i.priceGnf * i.quantity, 0);
+        const commissionGnf = items.reduce((s, i) => s + i.commissionGnf, 0);
+        const negotiable = lines.some((l) => l.listing.negotiable === true);
+        const requestedOffer = Number(body.offerAmountGnf);
+        const hasOffer =
+          negotiable && Number.isFinite(requestedOffer) && requestedOffer > 0;
+        const offerAmountGnf = hasOffer ? Math.round(requestedOffer) : null;
+        const amountGnf = hasOffer ? offerAmountGnf! : originalAmountGnf;
+        const shippingCostGnf = shippingAssigned
+          ? 0
+          : await resolveShipping(fulfillment, lines[0].listing);
+        shippingAssigned = true;
+        const pickupZoneId = lines[0].listing.zoneId || body.toZoneId || body.zoneId || null;
+
+        const order = await Order.create({
+          buyerId: user._id,
+          sellerId,
+          items,
+          amountGnf,
+          originalAmountGnf,
+          offerAmountGnf,
+          offerStatus: hasOffer ? "pending" : "none",
+          commissionGnf,
+          shippingCostGnf,
+          status: "ORDERED",
+          escrowStatus: "pending",
+          fulfillmentMode: fulfillment,
+          paymentMethod: method,
+          pickupCode: null,
+          pickupZoneId,
+          address: {
+            line: body.address,
+            city: body.city,
+            phone: deliveryPhone.e164,
+            name: body.name,
+            email: body.email.trim(),
+            paymentPhone: payPhone.e164,
           },
-          { status: "SELLER_NOTIFIED", at: new Date() },
-        ],
-      });
+          timeline: [{ status: "ORDERED", at: new Date(), note: "En attente de paiement CinetPay" }],
+        });
+        createdOrders.push(order);
 
-      for (const { listing, quantity } of lines) {
-        listing.quantity -= quantity;
-        if (listing.quantity <= 0) listing.status = "SOLD_OUT";
-        await listing.save();
+        for (const { listing, quantity } of lines) {
+          listing.quantity -= quantity;
+          if (listing.quantity <= 0) listing.status = "SOLD_OUT";
+          await listing.save();
+          reservedLines.push({ listingId: listing._id, quantity });
+        }
       }
 
-      await holdEscrow(sellerId, escrowNet, String(order._id));
-      await notifyOrderParties(order, "SELLER_NOTIFIED");
-      orders.push(await hydrateOrder(order));
+      const chargeGnf = createdOrders.reduce(
+        (s, o) => s + (o.amountGnf || 0) + (o.shippingCostGnf || 0),
+        0
+      );
+      if (chargeGnf < MIN_PAYMENT_GNF) {
+        throw badRequest(
+          "MIN_PAYMENT",
+          `Le montant minimum de paiement est de ${MIN_PAYMENT_GNF} GNF.`
+        );
+      }
+
+      const merchantTransactionId = `fc${createdOrders[0]._id.toString()}`.slice(0, 30);
+      const names = splitPersonName(body.name);
+      const returns = cinetpayReturnUrls(merchantTransactionId);
+      const payment = await Payment.create({
+        merchantTransactionId,
+        kind: "payment",
+        status: "pending",
+        paymentMethod: method,
+        amountGnf: chargeGnf,
+        phoneE164: payPhone.e164,
+        buyerId: user._id,
+        orderIds: createdOrders.map((o) => o._id),
+        reservedLines,
+      });
+      for (const order of createdOrders) {
+        order.paymentMerchantId = merchantTransactionId;
+        await order.save();
+      }
+
+      let result;
+      try {
+        result = await initCinetPayPayment({
+          merchantTransactionId,
+          amountGnf: chargeGnf,
+          method,
+          designation: "Commande FripCash",
+          email: body.email.trim(),
+          phoneE164: payPhone.e164,
+          firstName: names.first,
+          lastName: names.last,
+          notifyUrl: cinetpayNotifyUrl(),
+          successUrl: returns.successUrl,
+          failedUrl: returns.failedUrl,
+          directPay: false,
+        });
+      } catch (err) {
+        await settleInboundPayment(payment, {
+          code: 2010,
+          status: "FAILED",
+          message: err instanceof Error ? err.message : "Le paiement n'a pas abouti.",
+          mustRedirect: false,
+          raw: {},
+        });
+        throw err;
+      }
+      if (isFinalFailure(result.status) && result.status !== "PENDING" && result.status !== "INITIATED") {
+        await settleInboundPayment(payment, result);
+        throwIfHardFailure(result);
+        throw badRequest(result.status, result.message);
+      }
+      if (isFinalSuccess(result.status)) {
+        await settleInboundPayment(payment, result);
+      } else {
+        payment.notifyToken = result.notifyToken || payment.notifyToken;
+        payment.cinetpayTransactionId = result.transactionId || "";
+        payment.paymentUrl = result.paymentUrl || "";
+        payment.message = result.message;
+        payment.status = "pending";
+        await payment.save();
+      }
+
+      const fresh = (await Payment.findById(payment._id)) || payment;
+      const orders = await Promise.all(
+        createdOrders.map(async (o) => {
+          const row = await Order.findById(o._id);
+          return hydrateOrder(row || o);
+        })
+      );
+      res.json({
+        payment: paymentPublicView(fresh, {
+          mustRedirect: Boolean(fresh.paymentUrl) || result.mustRedirect,
+        }),
+        orders,
+      });
+    } catch (err) {
+      const alreadySettled = createdOrders.some(
+        (o) => o.status !== "ORDERED" && o.escrowStatus !== "pending"
+      );
+      if (!alreadySettled && reservedLines.length) {
+        const linked = await Payment.findOne({
+          orderIds: { $in: createdOrders.map((o) => o._id) },
+        });
+        if (!linked) {
+          await restoreReservedStock(reservedLines);
+          for (const order of createdOrders) {
+            if (order.status === "ORDERED") {
+              order.status = "REFUNDED";
+              order.escrowStatus = "refunded";
+              order.timeline.push({
+                status: "REFUNDED",
+                at: new Date(),
+                note: "Paiement non initié",
+              });
+              await order.save();
+            }
+          }
+        }
+      }
+      throw err;
     }
-
-    cart.set("items", []);
-    await cart.save();
-
-    res.json({
-      paymentIntent: { status: "simulated_success" },
-      orders,
-    });
   })
 );

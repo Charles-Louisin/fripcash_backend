@@ -11,12 +11,14 @@ import { sid } from "../utils/ids.js";
 import { notify, notifyCouriersForOrder, notifyOrderParties } from "../services/notify.js";
 import { hydrateOrder } from "../services/orders-hydrate.js";
 import { buildSalesChart } from "../services/stats.js";
-import { holdEscrow, refundEscrow, releaseEscrow } from "../services/wallet.js";
+import { holdEscrow } from "../services/wallet.js";
+import { payoutOrderToSeller, refundOrderToBuyer } from "../services/payments.js";
 
 export const ordersRouter = Router();
 ordersRouter.use(requireAuth);
 
 const TRANSITIONS: Record<string, string[]> = {
+  ORDERED: ["PAID", "REFUNDED", "DISPUTED"],
   PAID: ["SELLER_NOTIFIED", "PREPARING", "READY_FOR_PICKUP", "DISPUTED", "REFUNDED"],
   SELLER_NOTIFIED: ["PREPARING", "READY_FOR_PICKUP", "DISPUTED", "REFUNDED"],
   PREPARING: ["READY_FOR_PICKUP", "IN_TRANSIT", "DISPUTED", "REFUNDED"],
@@ -127,25 +129,23 @@ ordersRouter.patch(
           : "Aucun livreur disponible dans cette zone";
     }
 
-    row.status = next;
-    row.timeline.push({ status: next, at: new Date(), note });
-
     const net = orderNet(row);
-
-    if (next === "FUNDS_RELEASED" && row.escrowStatus === "held") {
-      await releaseEscrow(sid(row.sellerId), net, sid(row._id));
-      row.escrowStatus = "released";
+    if (next === "FUNDS_RELEASED" && (row.escrowStatus === "held" || row.escrowStatus === "payout_pending")) {
+      await payoutOrderToSeller(row, net, "Libération séquestre FripCash");
+    } else if (
+      next === "REFUNDED" &&
+      (row.escrowStatus === "held" || row.escrowStatus === "refund_pending")
+    ) {
+      await refundOrderToBuyer(row, net, "Remboursement commande FripCash");
+    } else {
+      row.status = next;
+      row.timeline.push({ status: next, at: new Date(), note });
+      await row.save();
+      await notifyOrderParties(row, next, note);
     }
-    if (next === "REFUNDED" && row.escrowStatus === "held") {
-      await refundEscrow(sid(row.sellerId), sid(row.buyerId), net, sid(row._id));
-      row.escrowStatus = "refunded";
-    }
-    if (next === "DELIVERED" && row.fulfillmentMode !== "courier") {
-      // pickup complete — buyer still confirms for release
-    }
-    await row.save();
-    await notifyOrderParties(row, next, note);
-    res.json(await hydrateOrder(row));
+    const fresh = await Order.findById(row._id);
+    if (!fresh) throw notFound();
+    res.json(await hydrateOrder(fresh));
   })
 );
 
@@ -171,16 +171,14 @@ ordersRouter.post(
     if (row.status !== "DELIVERED") {
       row.status = "DELIVERED";
       row.timeline.push({ status: "DELIVERED", at: new Date(), note: "Réception confirmée" });
+      await row.save();
     }
-    if (row.escrowStatus === "held") {
-      await releaseEscrow(sid(row.sellerId), orderNet(row), sid(row._id));
-      row.escrowStatus = "released";
+    if (row.escrowStatus === "held" || row.escrowStatus === "payout_pending") {
+      await payoutOrderToSeller(row, orderNet(row), "Libération séquestre FripCash");
     }
-    row.status = "FUNDS_RELEASED";
-    row.timeline.push({ status: "FUNDS_RELEASED", at: new Date(), note: "Séquestre libérée" });
-    await row.save();
-    await notifyOrderParties(row, "FUNDS_RELEASED", "L'acheteur a confirmé la réception");
-    res.json(await hydrateOrder(row));
+    const fresh = await Order.findById(row._id);
+    if (!fresh) throw notFound();
+    res.json(await hydrateOrder(fresh));
   })
 );
 
@@ -273,16 +271,15 @@ ordersRouter.post(
     const row = await Order.findById(req.params.id);
     if (!row) throw notFound();
     if (sid(row.sellerId) !== (req as AuthedRequest).userId) throw forbidden();
-    if (row.escrowStatus !== "held") throw badRequest("ESCROW", "Séquestre déjà clôturé");
+    if (row.escrowStatus !== "held" && row.escrowStatus !== "refund_pending") {
+      throw badRequest("ESCROW", "Séquestre déjà clôturé");
+    }
     const net = orderNet(row);
     const amount = req.body.amount === "full" || !req.body.amount ? net : Number(req.body.amount);
-    await refundEscrow(sid(row.sellerId), sid(row.buyerId), amount, sid(row._id));
-    row.status = "REFUNDED";
-    row.escrowStatus = "refunded";
-    row.timeline.push({ status: "REFUNDED", at: new Date(), note: "Remboursement vendeur" });
-    await row.save();
-    await notifyOrderParties(row, "REFUNDED", "Remboursement vendeur");
-    res.json(await hydrateOrder(row));
+    await refundOrderToBuyer(row, amount, "Remboursement vendeur FripCash");
+    const fresh = await Order.findById(row._id);
+    if (!fresh) throw notFound();
+    res.json(await hydrateOrder(fresh));
   })
 );
 
@@ -374,20 +371,23 @@ ordersRouter.post(
     if (row.offerStatus !== "refused") {
       throw badRequest("OFFER_NOT_REFUSED", "L'offre n'a pas été refusée");
     }
-    if (row.escrowStatus === "held") {
-      await refundEscrow(sid(row.sellerId), sid(row.buyerId), orderNet(row), sid(row._id));
+    if (row.escrowStatus === "held" || row.escrowStatus === "refund_pending") {
+      await refundOrderToBuyer(row, orderNet(row), "Annulation après refus d'offre");
+    } else {
+      row.status = "REFUNDED";
+      row.escrowStatus = "refunded";
+      row.offerStatus = "refused";
+      row.timeline.push({
+        status: "REFUNDED",
+        at: new Date(),
+        note: "Annulation après refus d'offre",
+      });
+      await row.save();
     }
-    row.status = "REFUNDED";
-    row.escrowStatus = "refunded";
-    row.offerStatus = "refused";
-    row.timeline.push({
-      status: "REFUNDED",
-      at: new Date(),
-      note: "Annulation après refus d'offre — séquestre remboursé",
-    });
-    await row.save();
     await notify(sid(row.sellerId), "order", "Commande annulée", "L'acheteur a annulé après le refus de l'offre.");
-    res.json(await hydrateOrder(row));
+    const fresh = await Order.findById(row._id);
+    if (!fresh) throw notFound();
+    res.json(await hydrateOrder(fresh));
   })
 );
 
@@ -402,7 +402,7 @@ invoicesRouter.get(
       url: null,
       receiptUrl: null,
       order: await hydrateOrder(row),
-      simulated: true,
+      simulated: false,
     });
   })
 );

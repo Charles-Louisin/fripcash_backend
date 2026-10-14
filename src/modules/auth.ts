@@ -201,7 +201,11 @@ authRouter.post(
     const token = await issue(req, user, aud);
     let verificationCode: string | null = null;
     if (user.email && !user.emailVerified) {
-      verificationCode = await issueEmailVerificationCode(user);
+      try {
+        verificationCode = await issueEmailVerificationCode(user);
+      } catch (err) {
+        logger.error({ err, email: user.email }, "Code email non envoyé — connexion conservée");
+      }
     }
     res.json({
       token,

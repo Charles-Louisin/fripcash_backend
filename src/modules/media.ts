@@ -4,17 +4,19 @@ import path from "path";
 import { randomBytes } from "crypto";
 import { z } from "zod";
 import { UTApi } from "uploadthing/server";
-import { requireAuth } from "../middleware/auth.js";
+import { optionalAuth, type AuthedRequest } from "../middleware/auth.js";
+import { unauthorized } from "../utils/http-error.js";
 import { validate } from "../middleware/validate.js";
 import { ah } from "../utils/async-handler.js";
 import { env } from "../config/env.js";
 import { badRequest } from "../utils/http-error.js";
+import { publicMediaUrl } from "../utils/public-url.js";
 
 export const mediaRouter = Router();
 
 mediaRouter.post(
   "/upload",
-  requireAuth,
+  optionalAuth,
   validate(
     z.object({
       filename: z.string().min(1),
@@ -24,6 +26,10 @@ mediaRouter.post(
     })
   ),
   ah(async (req, res) => {
+    const folder = (req.body.folder || "listings").replace(/[^a-z]/gi, "");
+    if (!(req as AuthedRequest).userId && folder !== "kyc") {
+      throw unauthorized();
+    }
     const raw = Buffer.from(
       String(req.body.dataBase64).replace(/^data:[^;]+;base64,/, ""),
       "base64"
@@ -57,14 +63,13 @@ mediaRouter.post(
       }
     }
 
-    const folder = (req.body.folder || "listings").replace(/[^a-z]/gi, "");
     const dir = path.join(process.cwd(), "uploads", folder);
     await mkdir(dir, { recursive: true });
     const ext = path.extname(filename) || ".jpg";
     const name = `${Date.now()}-${randomBytes(6).toString("hex")}${ext}`;
     await writeFile(path.join(dir, name), raw);
     const publicId = `${folder}/${name}`;
-    const url = `/uploads/${folder}/${name}`;
+    const url = publicMediaUrl(`/uploads/${folder}/${name}`) || `/uploads/${folder}/${name}`;
     res.json({
       publicId,
       url,

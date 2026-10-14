@@ -28,3 +28,7 @@ export function notFound(message = "Introuvable") {
 export function conflict(code: string, message: string) {
   return new HttpError(409, code, message);
 }
+
+export function badGateway(code: string, message: string) {
+  return new HttpError(502, code, message);
+}

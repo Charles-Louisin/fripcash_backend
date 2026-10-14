@@ -4,6 +4,23 @@ import { verifyToken } from "../utils/jwt.js";
 
 const f = createUploadthing();
 
+async function optionalUploader({
+  req,
+}: {
+  req: { headers: { authorization?: string | string[] } };
+}) {
+  const raw = req.headers.authorization;
+  const header = Array.isArray(raw) ? raw[0] : raw;
+  const token = header?.startsWith("Bearer ") ? header.slice(7) : null;
+  if (!token) return { userId: "guest" };
+  try {
+    const payload = verifyToken(token);
+    return { userId: payload.sub };
+  } catch {
+    return { userId: "guest" };
+  }
+}
+
 async function requireUploader({
   req,
 }: {
@@ -23,7 +40,7 @@ async function requireUploader({
 
 export const uploadRouter = {
   profileImage: f({ image: { maxFileSize: "4MB", maxFileCount: 1 } })
-    .middleware(requireUploader)
+    .middleware(optionalUploader)
     .onUploadComplete(async ({ file }) => ({
       url: file.ufsUrl || file.url,
       key: file.key,
@@ -44,7 +61,7 @@ export const uploadRouter = {
     image: { maxFileSize: "8MB", maxFileCount: 4 },
     pdf: { maxFileSize: "8MB", maxFileCount: 4 },
   })
-    .middleware(requireUploader)
+    .middleware(optionalUploader)
     .onUploadComplete(async ({ file }) => ({ url: file.ufsUrl, key: file.key })),
   excelCatalog: f({
     blob: { maxFileSize: "8MB", maxFileCount: 1 },

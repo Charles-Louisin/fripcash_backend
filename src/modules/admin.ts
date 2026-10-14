@@ -16,7 +16,8 @@ import { toAdminUser, toListing, toMe } from "../serializers.js";
 import { getSettings, notify } from "../services/notify.js";
 import { hydrateOrder } from "../services/orders-hydrate.js";
 import { buildAdminStats } from "../services/stats.js";
-import { refundEscrow, releaseEscrow } from "../services/wallet.js";
+import { payoutOrderToSeller, refundOrderToBuyer } from "../services/payments.js";
+import { getOrCreateWallet, refundEscrow, releaseEscrow } from "../services/wallet.js";
 import {
   buyerDisplayName,
   sellerDisplayName,
@@ -210,35 +211,45 @@ adminRouter.post(
     if (!order) throw notFound();
     const resolution = req.body.resolution || req.body.outcome;
     const net = order.items.reduce((s: number, i: any) => s + (i.netPriceGnf || 0) * (i.quantity || 1), 0);
+    let savedByTransfer = false;
     if (resolution === "resolved_buyer" || resolution === "refund_buyer") {
-      if (order.escrowStatus === "held") {
-        await refundEscrow(sid(order.sellerId), sid(order.buyerId), net, sid(order._id));
+      if (order.escrowStatus === "held" || order.escrowStatus === "refund_pending") {
+        await refundOrderToBuyer(order, net, "Litige — remboursement acheteur");
+        savedByTransfer = true;
+      } else {
+        order.status = "REFUNDED";
+        order.escrowStatus = "refunded";
       }
-      order.status = "REFUNDED";
-      order.escrowStatus = "refunded";
     } else if (resolution === "partial_refund") {
       const buyerPct = Math.min(100, Math.max(0, Number(req.body.buyerPercent ?? 50)));
       const sellerPct = Math.min(100, Math.max(0, Number(req.body.sellerPercent ?? 100 - buyerPct)));
       const buyerAmt = Math.round((net * buyerPct) / 100);
       const sellerAmt = Math.round((net * sellerPct) / 100);
       if (order.escrowStatus === "held") {
-        if (buyerAmt > 0) await refundEscrow(sid(order.sellerId), sid(order.buyerId), buyerAmt, sid(order._id));
+        if (buyerAmt > 0) {
+          await refundEscrow(sid(order.sellerId), sid(order.buyerId), buyerAmt, sid(order._id));
+          const buyerWallet = await getOrCreateWallet(sid(order.buyerId));
+          buyerWallet.availableGnf += buyerAmt;
+          await buyerWallet.save();
+        }
         if (sellerAmt > 0) await releaseEscrow(sid(order.sellerId), sellerAmt, sid(order._id));
       }
       order.status = "FUNDS_RELEASED";
       order.escrowStatus = "released";
     } else {
-      if (order.escrowStatus === "held") {
-        await releaseEscrow(sid(order.sellerId), net, sid(order._id));
+      if (order.escrowStatus === "held" || order.escrowStatus === "payout_pending") {
+        await payoutOrderToSeller(order, net, "Litige — libération vendeur");
+        savedByTransfer = true;
+      } else {
+        order.status = "FUNDS_RELEASED";
+        order.escrowStatus = "released";
       }
-      order.status = "FUNDS_RELEASED";
-      order.escrowStatus = "released";
     }
     d.status = "resolved";
     d.resolution = resolution;
     d.note = req.body.note || "";
     await d.save();
-    await order.save();
+    if (!savedByTransfer) await order.save();
     await notify(sid(order.buyerId), "dispute", "Litige résolu", resolution);
     await notify(sid(order.sellerId), "dispute", "Litige résolu", resolution);
     res.json({ id: sid(d._id), status: d.status, resolution });
@@ -297,6 +308,15 @@ adminRouter.get(
         avatarUrl: (u as any).avatarUrl || "",
         coverUrl: u.seller?.coverUrl || "",
         shopDescription: u.seller?.shopDescription || "",
+        storeAddress: u.seller?.storeAddress || "",
+        soldCategories: u.seller?.soldCategories || [],
+        deliveredCommunes: u.seller?.deliveredCommunes || [],
+        deliveryDelay: u.seller?.deliveryDelay || "",
+        neighborhood: u.seller?.neighborhood || "",
+        landmark: u.seller?.landmark || "",
+        orangeMoneyPhone: u.seller?.orangeMoneyPhone || "",
+        openingTime: u.seller?.openingTime || "",
+        closingTime: u.seller?.closingTime || "",
         createdAt: u.seller?.shopCreatedAt || u.createdAt,
         documents: u.seller?.kycDocuments || [],
         messages: (u.seller?.verificationMessages || []).map((m: any) => ({

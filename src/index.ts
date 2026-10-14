@@ -11,6 +11,16 @@ async function main() {
       { port: env.port, address: server.address() },
       "FripCash API listening on 0.0.0.0"
     );
+    logger.info(
+      {
+        cinetpayEnv: env.cinetpayEnv,
+        cinetpaySource: env.cinetpayEnvSource,
+        cinetpayHost: env.cinetpayBaseUrl,
+        cinetpayCurrency: env.cinetpayCurrency,
+        cinetpayConfigured: Boolean(env.cinetpayAccountKey && env.cinetpayAccountPassword),
+      },
+      "CinetPay environment"
+    );
   });
   server.on("error", (err) => {
     logger.error({ err }, "HTTP server error");

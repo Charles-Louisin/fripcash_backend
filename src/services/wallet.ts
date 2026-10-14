@@ -69,6 +69,6 @@ export async function refundEscrow(
     type: "refund_origin",
     amountGnf,
     isCredit: true,
-    label: "Remboursement simulé vers le moyen de paiement d'origine",
+    label: "Remboursement vers le moyen de paiement d'origine",
   });
 }

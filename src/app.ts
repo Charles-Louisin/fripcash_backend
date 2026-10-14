@@ -15,6 +15,8 @@ import { listingsRouter, reviewsRouter } from "./modules/listings.js";
 import { cartRouter, checkoutRouter } from "./modules/cart.js";
 import { invoicesRouter, ordersRouter } from "./modules/orders.js";
 import { walletRouter } from "./modules/wallet.js";
+import { paymentsRouter } from "./modules/payments.js";
+import { cinetpayWebhookRouter } from "./modules/webhooks.js";
 import {
   conversationsRouter,
   favoritesRouter,
@@ -95,6 +97,8 @@ export function createApp() {
   app.use("/api/v1/sellers", reviewsRouter);
   app.use("/api/v1/cart", cartRouter);
   app.use("/api/v1/checkout", checkoutRouter);
+  app.use("/api/v1/payments", paymentsRouter);
+  app.use("/api/v1/cpn", cinetpayWebhookRouter);
   app.use("/api/v1/orders", ordersRouter);
   app.use("/api/v1/invoices", invoicesRouter);
   app.use("/api/v1/wallet", walletRouter);

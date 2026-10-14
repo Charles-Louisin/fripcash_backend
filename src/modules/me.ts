@@ -11,6 +11,7 @@ import { destinationForSeller } from "../utils/pricing.js";
 import { computeCapabilities } from "../utils/capabilities.js";
 import { toMe } from "../serializers.js";
 import { AuditLog } from "../models/ops.js";
+import { parseGnMobile } from "../services/gn-phone.js";
 
 export const meRouter = Router();
 
@@ -86,8 +87,17 @@ meRouter.post(
     z.object({
       shopKind: z.enum(["STANDARD", "PROXIMITE", "ENSEIGNE"]),
       name: z.string().min(1),
-      description: z.string().optional(),
+      description: z.string().min(1, "Ajoute une description."),
       coverUrl: z.string().max(2000).optional(),
+      storeAddress: z.string().max(300).optional(),
+      soldCategories: z.array(z.string().min(1).max(80)).max(30).optional(),
+      deliveredCommunes: z.array(z.string().min(1).max(80)).max(30).optional(),
+      deliveryDelay: z.string().max(80).optional(),
+      neighborhood: z.string().max(120).optional(),
+      landmark: z.string().max(300).optional(),
+      orangeMoneyPhone: z.string().max(32).optional(), // validated below as GN MM
+      openingTime: z.string().max(20).optional(),
+      closingTime: z.string().max(20).optional(),
       documents: z
         .array(
           z.object({
@@ -98,38 +108,62 @@ meRouter.post(
             documentType: z.string().optional(),
           })
         )
-        .optional(),
+        .min(1, "Ajoute au moins une pièce KYC."),
     })
   ),
   ah(async (req, res) => {
     const user = (req as AuthedRequest).userDoc!;
+    const shopKind = req.body.shopKind.toLowerCase() as "standard" | "proximite" | "enseigne";
+    const needsReview = shopKind === "proximite" || shopKind === "enseigne";
+    const pendingSameKind =
+      user.seller?.kind === "boutique" &&
+      user.seller.shopKind === shopKind &&
+      user.seller.verificationStatus === "pending";
     if (
       user.seller?.kind === "boutique" &&
-      user.seller.verificationStatus !== "rejected"
+      user.seller.verificationStatus !== "rejected" &&
+      !pendingSameKind
     ) {
       throw badRequest(
         "ALREADY_SHOP",
         "Tu as déjà une boutique ou une enseigne sur ce compte."
       );
     }
-    const shopKind = req.body.shopKind.toLowerCase() as "standard" | "proximite" | "enseigne";
-    const needsReview = shopKind === "proximite" || shopKind === "enseigne";
+    if (req.body.orangeMoneyPhone) {
+      const parsed = parseGnMobile(req.body.orangeMoneyPhone);
+      if (!parsed) {
+        throw badRequest(
+          "PHONE",
+          "Le numéro Mobile Money doit être un mobile guinéen Orange (62) ou MTN (65)."
+        );
+      }
+      req.body.orangeMoneyPhone = parsed.e164;
+    }
     user.seller = {
       kind: "boutique",
       shopKind,
       shopName: req.body.name,
       shopDescription: req.body.description || "",
       bio: req.body.description || "",
-      coverUrl: req.body.coverUrl || "",
-      likesCount: 0,
-      shopCreatedAt: new Date(),
-      kycDocuments: (req.body.documents || []).map((d: any) => ({
+      coverUrl: req.body.coverUrl || user.seller?.coverUrl || "",
+      likesCount: user.seller?.likesCount || 0,
+      shopCreatedAt: user.seller?.shopCreatedAt || new Date(),
+      kycDocuments: (req.body.documents || user.seller?.kycDocuments || []).map((d: any) => ({
         ...d,
-        createdAt: new Date(),
+        createdAt: d.createdAt || new Date(),
       })),
-      verificationMessages: [],
+      verificationMessages: user.seller?.verificationMessages || [],
       verificationStatus: needsReview ? "pending" : "approved",
       listingDestination: destinationForSeller("boutique", shopKind),
+      storeAddress: req.body.storeAddress || "",
+      soldCategories: req.body.soldCategories || [],
+      deliveredCommunes: req.body.deliveredCommunes || [],
+      deliveryDelay: req.body.deliveryDelay || "",
+      neighborhood: req.body.neighborhood || "",
+      landmark: req.body.landmark || "",
+      orangeMoneyPhone: req.body.orangeMoneyPhone || "",
+      openingTime: req.body.openingTime || "",
+      closingTime: req.body.closingTime || "",
     } as any;
     await user.save();
     if (needsReview) {
@@ -153,6 +187,16 @@ meRouter.get(
       reason: user.seller?.rejectionReason || "",
       shopName: user.seller?.shopName || "",
       shopKind: user.seller?.shopKind || null,
+      shopDescription: user.seller?.shopDescription || "",
+      storeAddress: user.seller?.storeAddress || "",
+      soldCategories: user.seller?.soldCategories || [],
+      deliveredCommunes: user.seller?.deliveredCommunes || [],
+      deliveryDelay: user.seller?.deliveryDelay || "",
+      neighborhood: user.seller?.neighborhood || "",
+      landmark: user.seller?.landmark || "",
+      orangeMoneyPhone: user.seller?.orangeMoneyPhone || "",
+      openingTime: user.seller?.openingTime || "",
+      closingTime: user.seller?.closingTime || "",
       documents: user.seller?.kycDocuments || [],
       messages: (user.seller?.verificationMessages || []).map((m: any) => ({
         senderId: m.senderId ? String(m.senderId) : null,

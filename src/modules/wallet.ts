@@ -5,8 +5,9 @@ import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 import { validate } from "../middleware/validate.js";
 import { ah } from "../utils/async-handler.js";
 import { badRequest } from "../utils/http-error.js";
-import { addLedger, getOrCreateWallet } from "../services/wallet.js";
+import { getOrCreateWallet } from "../services/wallet.js";
 import { getSettings } from "../services/notify.js";
+import { withdrawToMobile } from "../services/payments.js";
 import { sid } from "../utils/ids.js";
 
 export const walletRouter = Router();
@@ -46,25 +47,22 @@ walletRouter.get(
 
 walletRouter.post(
   "/withdraw",
-  validate(z.object({ amountGnf: z.number().int().min(1) })),
+  validate(z.object({ amountGnf: z.number().int().min(1), phone: z.string().min(8) })),
   ah(async (req, res) => {
     const settings = await getSettings();
     if (req.body.amountGnf < (settings.minWithdrawalGnf || 1)) {
       throw badRequest("MIN_WITHDRAWAL", "Montant inférieur au minimum");
     }
-    const w = await getOrCreateWallet((req as AuthedRequest).userId!);
-    if (w.availableGnf < req.body.amountGnf) {
-      throw badRequest("INSUFFICIENT", "Solde insuffisant");
-    }
-    w.availableGnf -= req.body.amountGnf;
-    await w.save();
-    await addLedger({
-      userId: (req as AuthedRequest).userId!,
-      type: "withdrawal",
+    const payment = await withdrawToMobile(
+      (req as AuthedRequest).userId!,
+      req.body.amountGnf,
+      req.body.phone
+    );
+    res.json({
+      status: payment.status === "success" ? "success" : "pending",
       amountGnf: req.body.amountGnf,
-      isCredit: false,
-      label: "Retrait simulé Orange Money",
+      merchantTransactionId: payment.merchantTransactionId,
+      message: payment.message || "Retrait Mobile Money initié",
     });
-    res.json({ status: "simulated_success", amountGnf: req.body.amountGnf });
   })
 );
