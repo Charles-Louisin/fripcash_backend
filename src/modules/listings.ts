@@ -17,6 +17,7 @@ import { previewBuyerPrice, rateForShopKind } from "../utils/pricing.js";
 import { getSettings } from "../services/notify.js";
 import { param, sid } from "../utils/ids.js";
 import { toListing } from "../serializers.js";
+import { requireAccountShippingZone } from "../utils/shipping-zone.js";
 import {
   listingsForSeller,
   reviewStatsForListings,
@@ -213,7 +214,6 @@ listingsRouter.post(
         "ENSEIGNES",
       ]),
       categoryId: z.string().optional(),
-      zoneId: z.string().optional(),
       conditionNote: z.string().optional(),
       negotiable: z.boolean().optional(),
       discountEnabled: z.boolean().optional(),
@@ -243,6 +243,7 @@ listingsRouter.post(
         ? settings.commissionRateProximite
         : settings.commissionRateStandard;
     const priceGnf = previewBuyerPrice(req.body.netPriceGnf, rate);
+    const zoneId = requireAccountShippingZone(user);
     const row = await Listing.create({
       sellerId: user._id,
       title: req.body.title,
@@ -254,7 +255,7 @@ listingsRouter.post(
       quantity: req.body.quantity,
       destination: user.seller?.listingDestination || req.body.destination,
       categoryId: req.body.categoryId || null,
-      zoneId: req.body.zoneId || null,
+      zoneId,
       conditionNote: req.body.conditionNote ?? null,
       negotiable: !!req.body.negotiable,
       discountEnabled: !!req.body.discountEnabled,
@@ -276,6 +277,7 @@ listingsRouter.patch(
     if (!row) throw notFound();
     if (sid(row.sellerId) !== sid(user._id)) throw forbidden();
     const patch = { ...req.body };
+    delete patch.zoneId;
     if (patch.netPriceGnf) {
       const rate = row.commissionRate || rateForShopKind(user.seller?.shopKind);
       patch.priceGnf = previewBuyerPrice(patch.netPriceGnf, rate);

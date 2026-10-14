@@ -42,6 +42,9 @@ export function toMe(user: InstanceType<typeof User>) {
     avatarUrl: (user as any).avatarUrl || "",
     city: (user as any).city || "",
     bio: (user as any).bio || user.seller?.bio || "",
+    shippingZoneId: (user as any).shippingZoneId
+      ? sid((user as any).shippingZoneId)
+      : null,
     seller: seller
       ? {
           profileId: sid(user._id),
@@ -54,6 +57,9 @@ export function toMe(user: InstanceType<typeof User>) {
           likesCount: seller.likesCount || 0,
           verificationStatus: seller.verificationStatus,
           listingDestination: seller.listingDestination,
+          shippingZoneId: (user as any).shippingZoneId
+            ? sid((user as any).shippingZoneId)
+            : null,
           allowedDestinations: allowedDestinations(seller.kind, seller.shopKind ?? null),
           capabilities: caps,
         }
@@ -117,7 +123,11 @@ export function toListing(
     id: sid(doc._id),
     sellerProfileId: sellerId,
     categoryId: doc.categoryId ? sid(doc.categoryId) : null,
-    zoneId: doc.zoneId ? sid(doc.zoneId) : null,
+    zoneId: doc.zoneId
+      ? sid(doc.zoneId)
+      : seller?.shippingZoneId
+        ? sid(seller.shippingZoneId)
+        : null,
     title: doc.title,
     description: doc.description,
     netPriceGnf: doc.netPriceGnf,

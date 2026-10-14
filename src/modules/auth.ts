@@ -25,6 +25,10 @@ import {
   audienceForUser,
   SIGNUP_ROLES,
 } from "../utils/signup-role.js";
+import {
+  isSellerSignupRole,
+  setUserShippingZone,
+} from "../utils/shipping-zone.js";
 
 const passwordSchema = z
   .string()
@@ -117,6 +121,7 @@ authRouter.post(
       signupRole: z.enum(SIGNUP_ROLES).optional(),
       name: z.string().min(1).optional(),
       displayName: z.string().min(1).optional(),
+      shippingZoneId: z.string().min(1).optional(),
     })
   ),
   ah(async (req, res) => {
@@ -127,6 +132,13 @@ authRouter.post(
     }
     await OtpCode.deleteMany({ phone });
     let user = await User.findOne({ phone });
+    const creatingSeller = isSellerSignupRole(req.body.signupRole) && !user?.seller;
+    if (creatingSeller && !req.body.shippingZoneId) {
+      throw badRequest(
+        "MISSING_SHIPPING_ZONE",
+        "Choisis ta zone d’expédition pour vendre."
+      );
+    }
     if (!user) {
       user = await User.create({
         phone,
@@ -135,13 +147,19 @@ authRouter.post(
         authAudience: "CONSUMER",
         canBuy: true,
       });
-      applySignupRole(user, req.body.signupRole);
+      if (req.body.shippingZoneId) {
+        await setUserShippingZone(user, req.body.shippingZoneId);
+      }
+      applySignupRole(user, req.body.signupRole, user.shippingZoneId);
       await user.save();
     } else {
       if (user.banned) throw forbidden("BANNED", "Compte suspendu");
       user.phoneNumberVerified = true;
+      if (req.body.shippingZoneId) {
+        await setUserShippingZone(user, req.body.shippingZoneId);
+      }
       if (!user.seller && req.body.signupRole) {
-        applySignupRole(user, req.body.signupRole);
+        applySignupRole(user, req.body.signupRole, user.shippingZoneId);
       }
       await user.save();
     }
@@ -159,12 +177,19 @@ authRouter.post(
       password: passwordSchema,
       name: z.string().min(1),
       signupRole: z.enum(SIGNUP_ROLES).optional(),
+      shippingZoneId: z.string().min(1).optional(),
     })
   ),
   ah(async (req, res) => {
     const email = String(req.body.email).toLowerCase();
     const exists = await User.findOne({ email });
     if (exists) throw badRequest("EMAIL_TAKEN", "Cet email est déjà utilisé");
+    if (isSellerSignupRole(req.body.signupRole) && !req.body.shippingZoneId) {
+      throw badRequest(
+        "MISSING_SHIPPING_ZONE",
+        "Choisis ta zone d’expédition pour vendre."
+      );
+    }
     const user = await User.create({
       email,
       name: req.body.name,
@@ -173,7 +198,10 @@ authRouter.post(
       canBuy: true,
       emailVerified: false,
     });
-    applySignupRole(user, req.body.signupRole);
+    if (req.body.shippingZoneId) {
+      await setUserShippingZone(user, req.body.shippingZoneId);
+    }
+    applySignupRole(user, req.body.signupRole, user.shippingZoneId);
     await user.save();
     const token = await issue(req, user, "CONSUMER");
     const code = await issueEmailVerificationCode(user);

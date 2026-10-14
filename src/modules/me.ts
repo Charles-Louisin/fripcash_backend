@@ -12,6 +12,10 @@ import { computeCapabilities } from "../utils/capabilities.js";
 import { toMe } from "../serializers.js";
 import { AuditLog } from "../models/ops.js";
 import { parseGnMobile } from "../services/gn-phone.js";
+import {
+  setUserShippingZone,
+  syncSellerListingZones,
+} from "../utils/shipping-zone.js";
 
 export const meRouter = Router();
 
@@ -35,6 +39,7 @@ meRouter.patch(
       avatarUrl: z.string().max(2000).optional(),
       coverUrl: z.string().max(2000).optional(),
       phone: z.string().max(32).optional(),
+      shippingZoneId: z.string().min(1).optional(),
     })
   ),
   ah(async (req, res) => {
@@ -51,7 +56,13 @@ meRouter.patch(
       user.seller.coverUrl = req.body.coverUrl;
     }
     if (req.body.phone !== undefined && req.body.phone) user.phone = req.body.phone;
+    if (req.body.shippingZoneId) {
+      await setUserShippingZone(user, req.body.shippingZoneId);
+    }
     await user.save();
+    if (req.body.shippingZoneId) {
+      await syncSellerListingZones(user._id, user.shippingZoneId);
+    }
     res.json(toMe(user));
   })
 );
@@ -67,6 +78,14 @@ meRouter.post(
         "Boutique, commerce ou enseigne : tu es déjà vendeur. Pas besoin d’activer un profil particulier."
       );
     }
+    const zoneId = req.body?.shippingZoneId || user.shippingZoneId;
+    if (!zoneId) {
+      throw badRequest(
+        "MISSING_SHIPPING_ZONE",
+        "Choisis ta zone d’expédition pour vendre."
+      );
+    }
+    await setUserShippingZone(user, String(zoneId));
     user.seller = {
       kind: "particulier",
       shopKind: null,
@@ -98,6 +117,7 @@ meRouter.post(
       orangeMoneyPhone: z.string().max(32).optional(), // validated below as GN MM
       openingTime: z.string().max(20).optional(),
       closingTime: z.string().max(20).optional(),
+      shippingZoneId: z.string().min(1).optional(),
       documents: z
         .array(
           z.object({
@@ -139,6 +159,14 @@ meRouter.post(
       }
       req.body.orangeMoneyPhone = parsed.e164;
     }
+    const zoneId = req.body.shippingZoneId || user.shippingZoneId;
+    if (!zoneId) {
+      throw badRequest(
+        "MISSING_SHIPPING_ZONE",
+        "Choisis ta zone d’expédition pour vendre."
+      );
+    }
+    await setUserShippingZone(user, String(zoneId));
     user.seller = {
       kind: "boutique",
       shopKind,
@@ -166,6 +194,7 @@ meRouter.post(
       closingTime: req.body.closingTime || "",
     } as any;
     await user.save();
+    await syncSellerListingZones(user._id, user.shippingZoneId);
     if (needsReview) {
       await AuditLog.create({
         actorId: user._id,

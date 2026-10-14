@@ -94,6 +94,7 @@ const userSchema = new Schema(
     avatarUrl: { type: String, default: "" },
     city: { type: String, default: "" },
     bio: { type: String, default: "" },
+    shippingZoneId: { type: Schema.Types.ObjectId, ref: "Zone", default: null },
     authAudience: {
       type: String,
       enum: ["CONSUMER", "ADMIN", "COURIER"],

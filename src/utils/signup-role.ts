@@ -13,8 +13,10 @@ export type SignupRole = (typeof SIGNUP_ROLES)[number];
 
 export function applySignupRole(
   user: InstanceType<typeof User>,
-  role: SignupRole | undefined
+  role: SignupRole | undefined,
+  shippingZoneId?: unknown
 ) {
+  if (shippingZoneId) (user as any).shippingZoneId = shippingZoneId;
   if (!role || role === "acheteur") return user;
 
   if (role === "particulier") {

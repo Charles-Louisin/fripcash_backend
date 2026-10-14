@@ -219,15 +219,21 @@ checkoutRouter.post(
     }
 
     async function resolveShipping(fulfillment: string, listing: any) {
+      if (Number.isFinite(Number(body.shippingCostGnf)) && body.toZoneId) {
+        return Math.max(0, Number(body.shippingCostGnf));
+      }
       if (fulfillment === "pickup") return 0;
-      if (Number(body.shippingCostGnf) > 0) return Number(body.shippingCostGnf);
-      const from = listing.zoneId;
       const to = body.toZoneId || body.zoneId;
-      if (from && to) {
+      if (!to) return 0;
+      const from = listing.zoneId;
+      if (from) {
         const t = await DeliveryTariff.findOne({ fromZoneId: from, toZoneId: to });
         if (t) return t.amountGnf;
       }
-      return 0;
+      const same = await DeliveryTariff.findOne({ fromZoneId: to, toZoneId: to });
+      if (same) return same.amountGnf;
+      const any = await DeliveryTariff.findOne({ toZoneId: to }).sort({ amountGnf: 1 });
+      return any?.amountGnf || 0;
     }
 
     const createdOrders: any[] = [];
