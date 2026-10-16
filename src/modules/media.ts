@@ -34,8 +34,14 @@ mediaRouter.post(
       String(req.body.dataBase64).replace(/^data:[^;]+;base64,/, ""),
       "base64"
     );
+    if (raw.length > 8 * 1024 * 1024) {
+      throw badRequest("FILE_TOO_LARGE", "Fichier trop lourd (8 Mo max).");
+    }
     const filename = req.body.filename as string;
     const mimeType = (req.body.mimeType as string) || "image/jpeg";
+    if (!mimeType.startsWith("image/")) {
+      throw badRequest("INVALID_TYPE", "Seules les images sont acceptées.");
+    }
 
     if (env.uploadthingToken) {
       const utapi = new UTApi({ token: env.uploadthingToken });

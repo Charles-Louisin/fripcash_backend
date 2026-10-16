@@ -6,6 +6,13 @@ const SECRET_KEYS = new Set([
   "newPassword",
   "confirmPassword",
   "passwordHash",
+  "token",
+  "code",
+  "verificationCode",
+  "dataBase64",
+  "otp",
+  "jwt",
+  "authorization",
 ]);
 
 function safeBody(body: unknown) {

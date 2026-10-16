@@ -152,7 +152,18 @@ catalogRouter.get(
       .limit(limit)
       .lean();
     const stats = await reviewStatsForSellers(users.map((u) => u._id));
-    const shops = users.map((u) => toPublicShop(u, stats.get(String(u._id))));
+    const counts = users.length
+      ? await Listing.aggregate<{ _id: unknown; n: number }>([
+          { $match: { sellerId: { $in: users.map((u) => u._id) }, status: "ACTIVE" } },
+          { $group: { _id: "$sellerId", n: { $sum: 1 } } },
+        ])
+      : [];
+    const countMap = new Map(counts.map((c) => [String(c._id), c.n]));
+    const shops = users.map((u) =>
+      toPublicShop(u, stats.get(String(u._id)), {
+        listingsCount: countMap.get(String(u._id)) || 0,
+      })
+    );
     res.json(
       minRating > 0 ? shops.filter((s) => (s.rating || 0) >= minRating) : shops
     );

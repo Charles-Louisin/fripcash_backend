@@ -132,7 +132,9 @@ listingsRouter.get(
       filter.$or = textOr;
     }
 
-    const rows = await Listing.find(filter).sort({ createdAt: -1 }).lean();
+    const limit = Math.min(80, Math.max(1, Number(req.query.limit) || 40));
+    const fetchCap = Math.min(200, limit * 3);
+    const rows = await Listing.find(filter).sort({ createdAt: -1 }).limit(fetchCap).lean();
     const sellers = await User.find({ _id: { $in: rows.map((r) => r.sellerId) } }).lean();
     const map = new Map(sellers.map((s) => [String(s._id), s]));
     const visible = mine
@@ -169,7 +171,8 @@ listingsRouter.get(
           return false;
         }
         return true;
-      });
+      })
+      .slice(0, limit);
     res.json(payload);
   })
 );
@@ -434,6 +437,7 @@ reviewsRouter.get(
     res.json(
       toPublicShop(user, stats.get(String(user._id)), {
         listings,
+        listingsCount: listings.length,
         likedByMe,
       })
     );

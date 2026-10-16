@@ -33,6 +33,24 @@ import { requireAuth, type AuthedRequest } from "./middleware/auth.js";
 import { toMe } from "./serializers.js";
 import path from "path";
 
+function isAllowedOrigin(origin: string) {
+  const allowed = env.corsOrigin.split(",").map((s) => s.trim()).filter(Boolean);
+  if (allowed.includes("*") || allowed.includes(origin)) return true;
+  try {
+    const host = new URL(origin).hostname;
+    if (host === "localhost" || host === "127.0.0.1") return true;
+    if (/^192\.168\.\d+\.\d+$/.test(host)) return true;
+    if (/^10\.\d+\.\d+\.\d+$/.test(host)) return true;
+    if (/^172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+$/.test(host)) return true;
+    if (/\.exp\.direct$/.test(host)) return true;
+    if (/\.expo\.dev$/.test(host)) return true;
+    if (/\.ngrok(?:-free)?\.(?:app|io)$/.test(host)) return true;
+    return env.nodeEnv !== "production";
+  } catch {
+    return false;
+  }
+}
+
 export function createApp() {
   const app = express();
   app.set("trust proxy", 1);
@@ -41,31 +59,28 @@ export function createApp() {
     cors({
       origin(origin, cb) {
         if (!origin) return cb(null, true);
-        const allowed = env.corsOrigin.split(",").map((s) => s.trim());
-        if (allowed.includes(origin)) return cb(null, true);
-        if (env.nodeEnv !== "production") {
-          try {
-            const host = new URL(origin).hostname;
-            if (
-              host === "localhost" ||
-              host === "127.0.0.1" ||
-              /^192\.168\.\d+\.\d+$/.test(host) ||
-              /^10\.\d+\.\d+\.\d+$/.test(host)
-            ) {
-              return cb(null, true);
-            }
-          } catch {
-            /* ignore */
-          }
-        }
-        cb(new Error(`CORS blocked: ${origin}`));
+        cb(null, isAllowedOrigin(origin));
       },
       credentials: true,
     })
   );
   app.use(compression());
-  app.use(express.json({ limit: "16mb" }));
+  app.use("/api/v1/media", express.json({ limit: "16mb" }));
+  app.use(express.json({ limit: "1mb" }));
   app.use(requestLogger);
+
+  if (env.rateLimitMax > 0) {
+    app.use(
+      "/api/v1",
+      rateLimit({
+        windowMs: env.rateLimitWindowMs,
+        max: env.rateLimitMax,
+        standardHeaders: true,
+        legacyHeaders: false,
+        skip: (req) => req.path === "/health" || req.path === "/health/ready",
+      })
+    );
+  }
 
   const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 80 });
   app.use("/api/v1/auth/phone-number", authLimiter);

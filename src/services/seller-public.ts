@@ -68,6 +68,11 @@ export function toPublicShop(
     reviewsCount: stats?.reviewsCount || 0,
     likesCount: user.seller?.likesCount || 0,
     createdAt: user.seller?.shopCreatedAt || user.createdAt,
+    listingsCount: 0,
+    city: user.city || "",
+    neighborhood: user.seller?.neighborhood || "",
+    storeAddress: user.seller?.storeAddress || "",
+    soldCategories: user.seller?.soldCategories || [],
     ...extras,
   };
 }
