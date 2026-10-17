@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import { Cart, Order, Payment } from "../models/commerce.js";
+import { Offer } from "../models/social.js";
 import { Listing } from "../models/listing.js";
 import { User } from "../models/user.js";
 import { badRequest, notFound } from "../utils/http-error.js";
@@ -112,6 +113,7 @@ export async function settleInboundPayment(payment: any, result: CinetPayApiResu
     await restoreReservedStock(payment.reservedLines || []);
     payment.reservedLines = [];
     await payment.save();
+    await Offer.updateMany({ orderId: { $in: payment.orderIds } }, { orderId: null });
     const orders = await Order.find({ _id: { $in: payment.orderIds } });
     for (const order of orders) {
       if (order.status !== "ORDERED") continue;

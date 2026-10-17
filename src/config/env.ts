@@ -40,6 +40,7 @@ export const env = {
   uploadthingToken: process.env.UPLOADTHING_TOKEN || "",
   resendApiKey: process.env.RESEND_API_KEY || "",
   resendFrom: process.env.RESEND_FROM || "FripCash <onboarding@resend.dev>",
+  expoAccessToken: (process.env.EXPO_ACCESS_TOKEN || "").trim(),
   cinetpayAccountKey: cinetpayKey,
   cinetpayAccountPassword: (process.env.CINETPAY_ACCOUNT_PASSWORD || "").trim(),
   cinetpayEnv: cinetpayIsLive ? "live" : "sandbox",

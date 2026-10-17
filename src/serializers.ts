@@ -58,6 +58,10 @@ export function toMe(user: InstanceType<typeof User>) {
           likesCount: seller.likesCount || 0,
           verificationStatus: seller.verificationStatus,
           listingDestination: seller.listingDestination,
+          bundleEnabled: !!seller.bundleEnabled,
+          bundleMinItems: seller.bundleMinItems || 2,
+          bundleDiscountPercent: seller.bundleDiscountPercent || 0,
+          vacationEnabled: !!seller.vacationEnabled,
           shippingZoneId: (user as any).shippingZoneId
             ? sid((user as any).shippingZoneId)
             : null,
@@ -117,11 +121,13 @@ export function toListing(
     reviewsCount?: number;
     listingRating?: number;
     listingReviewsCount?: number;
+    favoritesCount?: number;
   }
 ) {
   const sellerId = sid(doc.sellerId);
   return {
     id: sid(doc._id),
+    favoritesCount: extras?.favoritesCount ?? 0,
     sellerProfileId: sellerId,
     categoryId: doc.categoryId ? sid(doc.categoryId) : null,
     zoneId: doc.zoneId
@@ -165,6 +171,10 @@ export function toListing(
       verificationStatus: seller?.seller?.verificationStatus || null,
       rating: extras?.rating || 0,
       reviewsCount: extras?.reviewsCount || 0,
+      vacationEnabled: !!seller?.seller?.vacationEnabled,
+      bundleEnabled: !!seller?.seller?.bundleEnabled,
+      bundleMinItems: seller?.seller?.bundleMinItems || 2,
+      bundleDiscountPercent: seller?.seller?.bundleDiscountPercent || 0,
     },
     listingRating: extras?.listingRating || 0,
     listingReviewsCount: extras?.listingReviewsCount || 0,

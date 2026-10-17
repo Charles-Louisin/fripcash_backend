@@ -18,6 +18,7 @@ import { ah } from "../utils/async-handler.js";
 import { badRequest, forbidden, notFound } from "../utils/http-error.js";
 import { sid } from "../utils/ids.js";
 import { notify } from "../services/notify.js";
+import { toListing } from "../serializers.js";
 
 export const offersRouter = Router();
 offersRouter.use(requireAuth);
@@ -38,6 +39,7 @@ offersRouter.get(
         amountGnf: o.amountGnf,
         message: o.message,
         status: o.status,
+        used: !!o.orderId,
         createdAt: o.createdAt,
       }))
     );
@@ -96,6 +98,7 @@ offersRouter.patch(
     const offer = await Offer.findById(req.params.id);
     if (!offer) throw notFound();
     if (sid(offer.sellerId) !== (req as AuthedRequest).userId) throw forbidden();
+    if (offer.status !== "pending") throw badRequest("OFFER_CLOSED", "Cette offre a déjà reçu une réponse.");
     offer.status = "accepted";
     await offer.save();
     await notify(sid(offer.buyerId), "offer", "Offre acceptée", "", { offerId: sid(offer._id) });
@@ -109,6 +112,7 @@ offersRouter.patch(
     const offer = await Offer.findById(req.params.id);
     if (!offer) throw notFound();
     if (sid(offer.sellerId) !== (req as AuthedRequest).userId) throw forbidden();
+    if (offer.status !== "pending") throw badRequest("OFFER_CLOSED", "Cette offre a déjà reçu une réponse.");
     offer.status = "refused";
     await offer.save();
     await notify(sid(offer.buyerId), "offer", "Offre refusée", "", { offerId: sid(offer._id) });
@@ -160,8 +164,14 @@ conversationsRouter.post(
       if (!order) throw notFound();
       const buyerId = sid(order.buyerId);
       const sellerId = sid(order.sellerId);
-      if (uid !== buyerId && uid !== sellerId) throw forbidden();
-      otherId = uid === buyerId ? sellerId : buyerId;
+      const courierId = order.courierId ? sid(order.courierId) : null;
+      if (uid === courierId) {
+        otherId = req.body.with === "seller" ? sellerId : buyerId;
+      } else if (uid === buyerId || uid === sellerId) {
+        otherId = uid === buyerId ? sellerId : buyerId;
+      } else {
+        throw forbidden();
+      }
     }
     if (!otherId) throw badRequest("NO_PEER", "Destinataire manquant");
     let conv = req.body.orderId
@@ -223,9 +233,18 @@ conversationsRouter.post(
     await conv.save();
     const other = conv.participantIds.map((p) => sid(p)).find((id) => id !== uid);
     if (other) {
-      await notify(other, "message", "Nouveau message", req.body.body, {
-        conversationId: sid(conv._id),
-      });
+      const sender = (req as AuthedRequest).userDoc;
+      const senderName = sender?.seller?.shopName || sender?.name || "Nouveau message";
+      await notify(
+        other,
+        "message",
+        conv.orderId ? `${senderName} · Suivi de commande` : senderName,
+        req.body.body,
+        {
+          conversationId: sid(conv._id),
+          ...(conv.orderId ? { orderId: sid(conv.orderId) } : {}),
+        }
+      );
     }
     res.json({ id: sid(msg._id), body: msg.body, senderId: uid, createdAt: msg.createdAt });
   })
@@ -237,13 +256,22 @@ favoritesRouter.use(requireAuth);
 favoritesRouter.get(
   "/",
   ah(async (req, res) => {
-    const rows = await Favorite.find({ userId: (req as AuthedRequest).userId }).populate("listingId");
+    const rows = await Favorite.find({ userId: (req as AuthedRequest).userId })
+      .sort({ createdAt: -1 })
+      .populate({ path: "listingId", populate: { path: "sellerId" } })
+      .lean();
     res.json(
-      rows.map((f) => ({
-        id: sid(f._id),
-        listingId: sid(f.listingId),
-        listing: f.listingId,
-      }))
+      rows
+        .filter((f: any) => f.listingId && typeof f.listingId === "object")
+        .map((f: any) => ({
+          id: sid(f._id),
+          listingId: sid(f.listingId._id),
+          createdAt: f.createdAt,
+          listing: toListing(
+            { ...f.listingId, sellerId: f.listingId.sellerId?._id ?? f.listingId.sellerId },
+            f.listingId.sellerId && typeof f.listingId.sellerId === "object" ? f.listingId.sellerId : undefined
+          ),
+        }))
     );
   })
 );

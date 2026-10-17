@@ -2,6 +2,8 @@ import { Notification, PushDevice } from "../models/social.js";
 import { User } from "../models/user.js";
 import { sid } from "../utils/ids.js";
 import { courierCoversZone } from "../utils/courier-zones.js";
+import { logger } from "../utils/logger.js";
+import { sendPush } from "./push.js";
 
 export const ORDER_STEP_COPY: Record<string, { title: string; body: string }> = {
   ORDERED: { title: "Commande créée", body: "Ta commande a été enregistrée." },
@@ -42,6 +44,25 @@ export const ORDER_STEP_COPY: Record<string, { title: string; body: string }> = 
   REFUNDED: { title: "Remboursement", body: "La commande a été remboursée." },
 };
 
+const PREF_OF_TYPE: Record<string, string> = {
+  message: "MESSAGE",
+  conversation: "MESSAGE",
+  order: "ORDER",
+  dispute: "ORDER",
+  offer: "OFFER",
+  promotion: "PROMOTION",
+};
+
+async function channelsFor(userId: string, type: string) {
+  const prefType = PREF_OF_TYPE[type.toLowerCase()];
+  if (!prefType) return { inApp: true, push: true };
+  const user = await User.findById(userId).select("notifPrefs").lean();
+  const pref = ((user as any)?.notifPrefs || []).find(
+    (p: any) => String(p?.type || "").toUpperCase() === prefType
+  );
+  return { inApp: pref?.inApp !== false, push: pref?.push !== false };
+}
+
 export async function notify(
   userId: string,
   type: string,
@@ -50,7 +71,35 @@ export async function notify(
   data: Record<string, unknown> = {}
 ) {
   if (!userId) return null;
-  return Notification.create({ userId, type, title, body, data });
+  const channels = await channelsFor(userId, type);
+  const row = channels.inApp ? await Notification.create({ userId, type, title, body, data }) : null;
+  if (channels.push) {
+    sendPush(userId, title, body, {
+      ...data,
+      type,
+      ...(row ? { notificationId: sid(row._id) } : {}),
+    }).catch((err) => logger.warn({ err: String(err) }, "push failed"));
+  }
+  return row;
+}
+
+export async function notifyAdmins(
+  type: string,
+  title: string,
+  body = "",
+  data: Record<string, unknown> = {},
+  exceptUserId?: string
+) {
+  const admins = await User.find({
+    $or: [{ isAdmin: true }, { authAudience: "ADMIN" }],
+    banned: { $ne: true },
+  })
+    .select("_id")
+    .lean();
+  for (const admin of admins) {
+    const id = sid(admin._id);
+    if (id !== exceptUserId) await notify(id, type, title, body, data);
+  }
 }
 
 export async function notifyOrderParties(
@@ -69,7 +118,9 @@ export async function notifyOrderParties(
   };
   const payload = { orderId: sid(order._id), status };
   const body = extraBody || copy.body;
-  await notify(sid(order.buyerId), "order", copy.title, body, payload);
+  const buyerCopy =
+    status === "SELLER_NOTIFIED" ? ORDER_STEP_COPY.PAID : { title: copy.title, body };
+  await notify(sid(order.buyerId), "order", buyerCopy.title, extraBody || buyerCopy.body, payload);
   await notify(sid(order.sellerId), "order", copy.title, body, payload);
   if (order.courierId) {
     await notify(sid(order.courierId), "order", copy.title, body, payload);

@@ -8,6 +8,7 @@ const offerSchema = new Schema(
     amountGnf: { type: Number, required: true },
     message: { type: String, default: "" },
     status: { type: String, enum: ["pending", "accepted", "refused"], default: "pending" },
+    orderId: { type: Schema.Types.ObjectId, ref: "Order", default: null },
   },
   { timestamps: true }
 );

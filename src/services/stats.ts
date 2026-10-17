@@ -66,6 +66,19 @@ function mapAuditType(
   return "article";
 }
 
+const AUDIT_LABELS: Record<string, string> = {
+  "settings.patch": "Paramètres de la plateforme modifiés",
+  "dispute.resolve": "Litige tranché",
+  "user.set-role": "Rôle d'un compte modifié",
+  "user.ban": "Compte banni",
+  "user.unban": "Compte débanni",
+  "listing.patch": "Article modéré",
+  "seller.shop.apply": "Nouvelle demande de boutique",
+  "seller.approve": "Boutique validée",
+  "seller.reject": "Boutique refusée",
+  "courier.review": "Dossier livreur traité",
+};
+
 function formatRelativeFr(iso?: Date | string) {
   if (!iso) return "";
   const then = new Date(iso).getTime();
@@ -304,7 +317,7 @@ export async function buildAdminStats(days = 30) {
     activity: auditLogs.slice(0, 12).map((log: any) => ({
       id: sid(log._id),
       type: mapAuditType(log.action, log.entityType || log.target),
-      message: `${log.action || "action"}${log.target ? ` · ${log.target}` : ""}`,
+      message: String(log.meta?.label || AUDIT_LABELS[log.action] || log.action || "Action admin"),
       time: formatRelativeFr(log.createdAt),
     })),
     openDisputes,

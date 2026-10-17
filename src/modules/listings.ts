@@ -3,7 +3,7 @@ import { z } from "zod";
 import { Listing } from "../models/listing.js";
 import { Category } from "../models/catalog.js";
 import { User } from "../models/user.js";
-import { Comment, Review, SellerLike } from "../models/social.js";
+import { Comment, Favorite, Review, SellerLike } from "../models/social.js";
 import { optionalAuth, requireAuth, requireAudience, type AuthedRequest } from "../middleware/auth.js";
 import { validate } from "../middleware/validate.js";
 import { ah } from "../utils/async-handler.js";
@@ -26,6 +26,13 @@ import {
 } from "../services/seller-public.js";
 
 export const listingsRouter = Router();
+
+function authorName(user: any) {
+  if (!user || typeof user !== "object") return "";
+  const name = String(user.seller?.shopName || user.name || "").trim();
+  if (!name || name.includes("@") || /^\+?\d[\d\s]{6,}$/.test(name)) return "Membre FripCash";
+  return name;
+}
 
 async function hydrate(doc: any) {
   const seller = await User.findById(doc.sellerId).lean();
@@ -58,8 +65,9 @@ listingsRouter.get(
     const mine = req.query.mine === "1" || req.query.sellerId;
     const authed = req as AuthedRequest;
     if (mine && authed.userId) {
-      delete filter.status;
-      filter.sellerId = req.query.sellerId || authed.userId;
+      const target = String(req.query.sellerId || authed.userId);
+      filter.sellerId = target;
+      if (target === authed.userId) delete filter.status;
     }
 
     const createdWithinDays = Number(req.query.createdWithinDays);
@@ -146,10 +154,17 @@ listingsRouter.get(
               map.get(String(r.sellerId))?.seller?.verificationStatus,
           })
         );
-    const [stats, listingStats] = await Promise.all([
+    const [stats, listingStats, favRows] = await Promise.all([
       reviewStatsForSellers(visible.map((r) => r.sellerId)),
       reviewStatsForListings(visible.map((r) => r._id)),
+      visible.length
+        ? Favorite.aggregate<{ _id: unknown; n: number }>([
+            { $match: { listingId: { $in: visible.map((r) => r._id) } } },
+            { $group: { _id: "$listingId", n: { $sum: 1 } } },
+          ])
+        : [],
     ]);
+    const favCounts = new Map(favRows.map((f) => [String(f._id), f.n]));
     const minListingRating = Number(req.query.minListingRating) || 0;
     const minSellerRating = Number(req.query.minSellerRating) || 0;
     const payload = visible
@@ -158,6 +173,7 @@ listingsRouter.get(
           ...stats.get(String(r.sellerId)),
           listingRating: listingStats.get(String(r._id))?.rating,
           listingReviewsCount: listingStats.get(String(r._id))?.reviewsCount,
+          favoritesCount: favCounts.get(String(r._id)) || 0,
         })
       )
       .filter((item) => {
@@ -313,6 +329,7 @@ listingsRouter.post(
   ah(async (req, res) => {
     const row = await Listing.findById(req.params.id);
     if (!row) throw notFound();
+    if (sid(row.sellerId) !== (req as AuthedRequest).userId) throw forbidden();
     const media = {
       storageKey: req.body.publicId || req.body.storageKey || req.body.url,
       url: req.body.url,
@@ -339,6 +356,7 @@ listingsRouter.patch(
   ah(async (req, res) => {
     const row = await Listing.findById(req.params.id);
     if (!row) throw notFound();
+    if (sid(row.sellerId) !== (req as AuthedRequest).userId) throw forbidden();
     const media = row.media.id(param(req.params.mediaId));
     if (!media) throw notFound();
     if (req.body.url) media.url = req.body.url;
@@ -364,6 +382,7 @@ listingsRouter.delete(
   ah(async (req, res) => {
     const row = await Listing.findById(req.params.id);
     if (!row) throw notFound();
+    if (sid(row.sellerId) !== (req as AuthedRequest).userId) throw forbidden();
     row.media.pull({ _id: req.params.mediaId });
     await row.save();
     res.json({ status: true });
@@ -373,12 +392,18 @@ listingsRouter.delete(
 listingsRouter.get(
   "/:id/comments",
   ah(async (req, res) => {
-    const rows = await Comment.find({ listingId: req.params.id, hidden: false }).lean();
+    const rows = await Comment.find({ listingId: req.params.id, hidden: false })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .populate("userId", "name avatarUrl seller.shopName")
+      .lean();
     res.json(
-      rows.map((c) => ({
+      rows.map((c: any) => ({
         id: sid(c._id),
         body: c.body,
-        userId: sid(c.userId),
+        userId: sid(c.userId?._id ?? c.userId),
+        authorName: authorName(c.userId),
+        authorAvatarUrl: c.userId?.avatarUrl || null,
         parentId: c.parentId ? sid(c.parentId) : null,
         createdAt: c.createdAt,
       }))
@@ -389,27 +414,42 @@ listingsRouter.get(
 listingsRouter.post(
   "/:id/comments",
   requireAuth,
-  validate(z.object({ body: z.string().min(1), parentId: z.string().optional() })),
+  validate(z.object({ body: z.string().trim().min(1).max(1000), parentId: z.string().optional() })),
   ah(async (req, res) => {
+    const listing = await Listing.findById(req.params.id).select("_id");
+    if (!listing) throw notFound();
     const row = await Comment.create({
-      listingId: req.params.id,
+      listingId: listing._id,
       userId: (req as AuthedRequest).userId,
       body: req.body.body,
       parentId: req.body.parentId || null,
     });
-    res.json({ id: sid(row._id), body: row.body, createdAt: row.createdAt });
+    const author = (req as AuthedRequest).userDoc;
+    res.json({
+      id: sid(row._id),
+      body: row.body,
+      userId: (req as AuthedRequest).userId,
+      authorName: authorName(author),
+      authorAvatarUrl: author?.avatarUrl || null,
+      parentId: row.parentId ? sid(row.parentId) : null,
+      createdAt: row.createdAt,
+    });
   })
 );
 
 listingsRouter.get(
   "/:id/reviews",
   ah(async (req, res) => {
-    const rows = await Review.find({ listingId: req.params.id, hidden: false }).lean();
+    const rows = await Review.find({ listingId: req.params.id, hidden: false })
+      .sort({ createdAt: -1 })
+      .populate("buyerId", "name avatarUrl seller.shopName")
+      .lean();
     res.json(
-      rows.map((r) => ({
+      rows.map((r: any) => ({
         id: sid(r._id),
         rating: r.rating,
         comment: r.comment,
+        authorName: authorName(r.buyerId),
         createdAt: r.createdAt,
       }))
     );
@@ -434,10 +474,13 @@ reviewsRouter.get(
     if (uid) {
       likedByMe = !!(await SellerLike.findOne({ userId: uid, sellerId: user._id }));
     }
+    const categoryIds = [...new Set(listings.map((l) => l.categoryId).filter(Boolean))];
+    const categories = categoryIds.length ? await Category.find({ _id: { $in: categoryIds } }).lean() : [];
     res.json(
       toPublicShop(user, stats.get(String(user._id)), {
         listings,
         listingsCount: listings.length,
+        listingCategories: categories.map((c) => c.nameFr),
         likedByMe,
       })
     );

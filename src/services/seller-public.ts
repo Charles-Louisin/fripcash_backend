@@ -74,7 +74,16 @@ export function toPublicShop(
     city: user.city || "",
     neighborhood: user.seller?.neighborhood || "",
     storeAddress: user.seller?.storeAddress || "",
+    openingTime: user.seller?.openingTime || "",
+    closingTime: user.seller?.closingTime || "",
     soldCategories: user.seller?.soldCategories || [],
+    deliveredCommunes: user.seller?.deliveredCommunes || [],
+    deliveryDelay: user.seller?.deliveryDelay || "",
+    vacationEnabled: !!user.seller?.vacationEnabled,
+    bundleEnabled: !!user.seller?.bundleEnabled,
+    bundleMinItems: user.seller?.bundleMinItems || 2,
+    bundleDiscountPercent: user.seller?.bundleDiscountPercent || 0,
+    listingCategories: [] as string[],
     ...extras,
   };
 }

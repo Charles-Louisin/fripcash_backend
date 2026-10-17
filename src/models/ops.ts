@@ -12,6 +12,8 @@ const disputeSchema = new Schema(
       default: "open",
     },
     resolution: { type: String, default: null },
+    resolvedBy: { type: String, enum: ["admin", "buyer", "seller", null], default: null },
+    buyerPercent: { type: Number, default: null },
     note: { type: String, default: "" },
     evidence: [
       {
@@ -32,7 +34,7 @@ const disputeSchema = new Schema(
         fromAdmin: { type: Boolean, default: false },
         kind: {
           type: String,
-          enum: ["text", "info_request", "info_response"],
+          enum: ["text", "info_request", "info_response", "decision"],
           default: "text",
         },
         requestedKinds: { type: [String], default: [] },

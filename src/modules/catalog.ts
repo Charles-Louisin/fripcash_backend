@@ -3,7 +3,8 @@ import { z } from "zod";
 import { Category, DeliveryTariff, Zone } from "../models/catalog.js";
 import { Listing } from "../models/listing.js";
 import { User } from "../models/user.js";
-import { optionalAuth, requireAuth, requireAudience } from "../middleware/auth.js";
+import { optionalAuth, requireAuth, requireAudience, type AuthedRequest } from "../middleware/auth.js";
+import { SellerLike } from "../models/social.js";
 import { validate } from "../middleware/validate.js";
 import { ah } from "../utils/async-handler.js";
 import { notFound } from "../utils/http-error.js";
@@ -75,6 +76,7 @@ catalogRouter.get(
 
 catalogRouter.get(
   "/shops",
+  optionalAuth,
   ah(async (req, res) => {
     const shopKind = String(req.query.shopKind || "").toLowerCase();
     const q = String(req.query.q || "").trim();
@@ -153,17 +155,39 @@ catalogRouter.get(
       .lean();
     const stats = await reviewStatsForSellers(users.map((u) => u._id));
     const counts = users.length
-      ? await Listing.aggregate<{ _id: unknown; n: number }>([
+      ? await Listing.aggregate<{ _id: unknown; n: number; categories: unknown[] }>([
           { $match: { sellerId: { $in: users.map((u) => u._id) }, status: "ACTIVE" } },
-          { $group: { _id: "$sellerId", n: { $sum: 1 } } },
+          { $group: { _id: "$sellerId", n: { $sum: 1 }, categories: { $addToSet: "$categoryId" } } },
         ])
       : [];
-    const countMap = new Map(counts.map((c) => [String(c._id), c.n]));
-    const shops = users.map((u) =>
-      toPublicShop(u, stats.get(String(u._id)), {
-        listingsCount: countMap.get(String(u._id)) || 0,
-      })
+    const categoryIds = [...new Set(counts.flatMap((c) => c.categories.filter(Boolean).map(String)))];
+    const categoryNames = new Map(
+      (categoryIds.length ? await Category.find({ _id: { $in: categoryIds } }).lean() : []).map((c) => [
+        String(c._id),
+        c.nameFr,
+      ])
     );
+    const countMap = new Map(counts.map((c) => [String(c._id), c]));
+    const uid = (req as AuthedRequest).userId;
+    const liked = new Set(
+      uid && users.length
+        ? (
+            await SellerLike.find({ userId: uid, sellerId: { $in: users.map((u) => u._id) } })
+              .select("sellerId")
+              .lean()
+          ).map((l) => String(l.sellerId))
+        : []
+    );
+    const shops = users.map((u) => {
+      const row = countMap.get(String(u._id));
+      return toPublicShop(u, stats.get(String(u._id)), {
+        likedByMe: liked.has(String(u._id)),
+        listingsCount: row?.n || 0,
+        listingCategories: (row?.categories || [])
+          .map((id) => categoryNames.get(String(id)))
+          .filter(Boolean),
+      });
+    });
     res.json(
       minRating > 0 ? shops.filter((s) => (s.rating || 0) >= minRating) : shops
     );

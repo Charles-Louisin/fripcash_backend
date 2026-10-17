@@ -1,5 +1,6 @@
 import { User } from "../models/user.js";
 import { Listing } from "../models/listing.js";
+import { Review } from "../models/social.js";
 import { toOrder } from "../serializers.js";
 import { sid } from "../utils/ids.js";
 import { mediaUrlsFromListing, publicMediaUrl } from "../utils/public-url.js";
@@ -8,13 +9,14 @@ export async function hydrateOrder(order: any) {
   const listingIds = (order.items || [])
     .map((item: { listingId?: unknown }) => item.listingId)
     .filter(Boolean);
-  const [buyer, seller, courier, listings] = await Promise.all([
+  const [buyer, seller, courier, listings, reviewed] = await Promise.all([
     User.findById(order.buyerId).lean(),
     User.findById(order.sellerId).lean(),
     order.courierId ? User.findById(order.courierId).lean() : null,
     listingIds.length
       ? Listing.find({ _id: { $in: listingIds } }).select("title media").lean()
       : [],
+    Review.exists({ orderId: order._id, buyerId: order.buyerId }),
   ]);
   const byId = new Map(listings.map((row) => [String(row._id), row]));
   const images: string[] = [];
@@ -36,6 +38,7 @@ export async function hydrateOrder(order: any) {
     : [];
   return toOrder(order, {
     images: uniqueImages,
+    reviewed: !!reviewed,
     buyer: {
       id: sid(order.buyerId),
       pseudo: buyer?.name || "acheteur",
@@ -43,6 +46,8 @@ export async function hydrateOrder(order: any) {
     seller: {
       id: sid(order.sellerId),
       pseudo: seller?.seller?.shopName || seller?.name || "vendeur",
+      sellerKind: seller?.seller?.kind || null,
+      shopKind: seller?.seller?.shopKind || null,
     },
     courier: courier
       ? { id: sid(courier._id), pseudo: courier.name || "livreur" }

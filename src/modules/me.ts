@@ -2,20 +2,131 @@ import { Router } from "express";
 import { z } from "zod";
 import { User } from "../models/user.js";
 import { OrgKyc } from "../models/ops.js";
-import { LibraryItem } from "../models/listing.js";
+import { LibraryItem, Listing } from "../models/listing.js";
 import { requireAuth, requireAudience, type AuthedRequest } from "../middleware/auth.js";
 import { validate } from "../middleware/validate.js";
 import { ah } from "../utils/async-handler.js";
 import { badRequest, forbidden } from "../utils/http-error.js";
-import { destinationForSeller } from "../utils/pricing.js";
+import { destinationForSeller, previewBuyerPrice } from "../utils/pricing.js";
 import { computeCapabilities } from "../utils/capabilities.js";
 import { toMe } from "../serializers.js";
 import { AuditLog } from "../models/ops.js";
 import { parseGnMobile } from "../services/gn-phone.js";
 import {
+  requireAccountShippingZone,
   setUserShippingZone,
   syncSellerListingZones,
 } from "../utils/shipping-zone.js";
+import ExcelJS from "exceljs";
+import { Category } from "../models/catalog.js";
+import { getSettings } from "../services/notify.js";
+
+const MAX_IMPORT_ROWS = 200;
+
+const HEADER_ALIASES: Record<string, string> = {
+  titre: "titre",
+  title: "titre",
+  nom: "titre",
+  article: "titre",
+  produit: "titre",
+  prix: "prix",
+  price: "prix",
+  prixnet: "prix",
+  prixgnf: "prix",
+  quantite: "quantite",
+  qte: "quantite",
+  quantity: "quantite",
+  stock: "quantite",
+  description: "description",
+  categorie: "categorie",
+  category: "categorie",
+  etat: "etat",
+  condition: "etat",
+  negociable: "negociable",
+  image: "image",
+  photo: "image",
+  imageurl: "image",
+};
+
+function normHeader(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function cellText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "object") {
+    const v = value as any;
+    if (v.text) return String(v.text).trim();
+    if (v.hyperlink) return String(v.hyperlink).trim();
+    if (v.result !== undefined) return String(v.result).trim();
+    if (Array.isArray(v.richText)) return v.richText.map((r: any) => r.text).join("").trim();
+  }
+  return String(value).trim();
+}
+
+const IMPORT_HOSTS = ["utfs.io", "ufs.sh", "uploadthing.com"];
+
+async function importFileBuffer(body: any): Promise<Buffer> {
+  if (body?.base64) return Buffer.from(String(body.base64), "base64");
+  const raw = String(body?.url || body?.objectKey || "");
+  let url: URL | null = null;
+  try {
+    url = new URL(raw);
+  } catch {
+    url = null;
+  }
+  const allowed =
+    url?.protocol === "https:" &&
+    IMPORT_HOSTS.some((host) => url!.hostname === host || url!.hostname.endsWith(`.${host}`));
+  if (!url || !allowed) throw badRequest("FILE_REQUIRED", "Ajoute un fichier Excel (.xlsx) ou CSV.");
+  const response = await fetch(url);
+  if (!response.ok) throw badRequest("FILE_UNREACHABLE", "Fichier introuvable, renvoie-le.");
+  const size = Number(response.headers.get("content-length") || 0);
+  if (size > 8 * 1024 * 1024) throw badRequest("FILE_TOO_LARGE", "Fichier trop lourd (8 Mo maximum).");
+  return Buffer.from(await response.arrayBuffer());
+}
+
+async function readSheetRows(buffer: Buffer, csv: boolean) {
+  const workbook = new ExcelJS.Workbook();
+  let sheet: ExcelJS.Worksheet | undefined;
+  try {
+    if (csv) {
+      const { Readable } = await import("node:stream");
+      sheet = await workbook.csv.read(Readable.from(buffer));
+    } else {
+      await workbook.xlsx.load(buffer as any);
+      sheet = workbook.worksheets[0];
+    }
+  } catch {
+    throw badRequest("INVALID_FILE", "Fichier illisible. Utilise un fichier .xlsx ou .csv.");
+  }
+  if (!sheet) return [];
+  const keys: (string | null)[] = [];
+  sheet.getRow(1).eachCell({ includeEmpty: true }, (cell, col) => {
+    keys[col] = HEADER_ALIASES[normHeader(cellText(cell.value))] ?? null;
+  });
+  if (!keys.includes("titre") || !keys.includes("prix")) {
+    throw badRequest(
+      "MISSING_COLUMNS",
+      "La première ligne doit contenir au moins les colonnes « Titre » et « Prix »."
+    );
+  }
+  const rows: Record<string, unknown>[] = [];
+  sheet.eachRow((row, index) => {
+    if (index === 1) return;
+    const out: Record<string, unknown> = {};
+    row.eachCell({ includeEmpty: false }, (cell, col) => {
+      const key = keys[col];
+      if (key) out[key] = cell.value;
+    });
+    if (Object.values(out).some((v) => cellText(v))) rows.push(out);
+  });
+  return rows;
+}
 
 export const meRouter = Router();
 
@@ -334,8 +445,12 @@ meRouter.post(
     const user = (req as AuthedRequest).userDoc!;
     if (!user.seller) throw forbidden();
     user.seller.vacationEnabled = !!req.body.enabled;
-    user.seller.vacationStartsAt = req.body.startsAt ? new Date(req.body.startsAt) : null;
-    user.seller.vacationEndsAt = req.body.endsAt ? new Date(req.body.endsAt) : null;
+    if ("startsAt" in req.body) {
+      user.seller.vacationStartsAt = req.body.startsAt ? new Date(req.body.startsAt) : null;
+    }
+    if ("endsAt" in req.body) {
+      user.seller.vacationEndsAt = req.body.endsAt ? new Date(req.body.endsAt) : null;
+    }
     await user.save();
     res.json(toMe(user));
   })
@@ -384,17 +499,78 @@ meRouter.post(
       shopKind: user.seller?.shopKind ?? null,
       verificationStatus: user.seller?.verificationStatus,
     });
-    if (!caps.excelImport) {
+    if (!caps.excelImport || !caps.createListing) {
       throw forbidden(
         "FORBIDDEN",
         "Import Excel disponible après validation de ta boutique"
       );
     }
-    res.json({
-      status: "queued",
-      objectKey: req.body.objectKey,
-      message: "Fichier enregistré sur UploadThing.",
-    });
+    const isCsv = String(req.body?.filename || "").toLowerCase().endsWith(".csv");
+    const rows = await readSheetRows(await importFileBuffer(req.body), isCsv);
+    if (!rows.length) throw badRequest("EMPTY_FILE", "Le fichier ne contient aucune ligne d’article.");
+    if (rows.length > MAX_IMPORT_ROWS) {
+      throw badRequest("TOO_MANY_ROWS", `${MAX_IMPORT_ROWS} articles maximum par import.`);
+    }
+
+    const zoneId = requireAccountShippingZone(user);
+    const settings = await getSettings();
+    const rate =
+      user.seller?.shopKind === "proximite"
+        ? settings.commissionRateProximite
+        : settings.commissionRateStandard;
+    const destination =
+      user.seller?.listingDestination ||
+      destinationForSeller(user.seller?.kind as any, user.seller?.shopKind) ||
+      "SECONDE_MAIN";
+    const categories = await Category.find({}).select("nameFr").lean();
+    const categoryByName = new Map(categories.map((c: any) => [normHeader(c.nameFr), c._id]));
+
+    const errors: { row: number; message: string }[] = [];
+    let created = 0;
+    for (const [index, row] of rows.entries()) {
+      const line = index + 2;
+      const title = cellText(row.titre);
+      const net = Math.round(Number(cellText(row.prix).replace(/[^\d.]/g, "")));
+      if (title.length < 2) {
+        errors.push({ row: line, message: "Titre manquant" });
+        continue;
+      }
+      if (!net || net < 1) {
+        errors.push({ row: line, message: "Prix invalide" });
+        continue;
+      }
+      const quantity = Math.max(1, Math.round(Number(cellText(row.quantite)) || 1));
+      const categoryName = cellText(row.categorie);
+      const categoryId = categoryName ? categoryByName.get(normHeader(categoryName)) ?? null : null;
+      const priceGnf = previewBuyerPrice(net, rate);
+      const image = cellText(row.image);
+      try {
+        await Listing.create({
+          sellerId: user._id,
+          title,
+          description: cellText(row.description) || null,
+          netPriceGnf: net,
+          priceGnf,
+          commissionRate: rate,
+          commissionAmountGnf: priceGnf - net,
+          quantity,
+          destination,
+          categoryId,
+          zoneId,
+          conditionNote: cellText(row.etat) || null,
+          negotiable: /^(oui|yes|true|1|x)$/i.test(cellText(row.negociable)),
+          media: /^https?:\/\//i.test(image)
+            ? [{ storageKey: image, url: image, mimeType: "image/jpeg", sortOrder: 0 }]
+            : [],
+          status: "ACTIVE",
+          publishedAt: new Date(),
+        });
+        created += 1;
+      } catch (e: any) {
+        errors.push({ row: line, message: e?.message || "Ligne invalide" });
+      }
+    }
+    res.json({ status: "done", created, skipped: errors.length, errors: errors.slice(0, 20) });
   })
 );
 

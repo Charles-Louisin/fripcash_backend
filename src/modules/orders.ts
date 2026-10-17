@@ -8,7 +8,13 @@ import { validate } from "../middleware/validate.js";
 import { ah } from "../utils/async-handler.js";
 import { badRequest, forbidden, notFound } from "../utils/http-error.js";
 import { sid } from "../utils/ids.js";
-import { notify, notifyCouriersForOrder, notifyOrderParties } from "../services/notify.js";
+import {
+  getSettings,
+  notify,
+  notifyAdmins,
+  notifyCouriersForOrder,
+  notifyOrderParties,
+} from "../services/notify.js";
 import { hydrateOrder } from "../services/orders-hydrate.js";
 import { buildSalesChart } from "../services/stats.js";
 import { payoutOrderToSeller, refundOrderToBuyer } from "../services/payments.js";
@@ -171,6 +177,7 @@ ordersRouter.post(
       row.status = "DELIVERED";
       row.timeline.push({ status: "DELIVERED", at: new Date(), note: "Réception confirmée" });
       await row.save();
+      await notifyOrderParties(row, "DELIVERED", "L'acheteur a confirmé la réception.");
     }
     if (row.escrowStatus === "held" || row.escrowStatus === "payout_pending") {
       await payoutOrderToSeller(row, orderNet(row), "Libération séquestre FripCash");
@@ -221,6 +228,28 @@ ordersRouter.post(
       req.body.role ||
       (sid(row.buyerId) === uid ? "buyer" : sid(row.sellerId) === uid ? "seller" : null);
     if (!role) throw forbidden();
+    const ongoing = await Dispute.findOne({
+      orderId: row._id,
+      status: { $in: ["open", "under_review", "closed"] },
+    });
+    if (ongoing) {
+      res.json({ id: sid(ongoing._id), status: ongoing.status, reason: ongoing.reason });
+      return;
+    }
+    if (["FUNDS_RELEASED", "FEEDBACK_PENDING", "REFUNDED"].includes(row.status)) {
+      throw badRequest("DISPUTE_CLOSED", "Le paiement est déjà clôturé : un litige n'est plus possible.");
+    }
+    if (row.status === "DELIVERED") {
+      const settings = await getSettings();
+      const hours = Number(settings.disputeWindowHours) || 72;
+      const deliveredAt = [...(row.timeline || [])].reverse().find((t: any) => t.status === "DELIVERED")?.at;
+      if (deliveredAt && Date.now() - new Date(deliveredAt).getTime() > hours * 3_600_000) {
+        throw badRequest(
+          "DISPUTE_WINDOW",
+          `Le délai pour ouvrir un litige (${hours} h après la livraison) est dépassé.`
+        );
+      }
+    }
     row.status = "DISPUTED";
     row.disputeReason = req.body.reason;
     row.timeline.push({ status: "DISPUTED", at: new Date(), note: req.body.reason });
@@ -231,12 +260,15 @@ ordersRouter.post(
       openerRole: role,
       reason: req.body.reason,
     });
-    await notify(sid(row.buyerId), "dispute", "Litige ouvert", req.body.reason, {
-      disputeId: sid(dispute._id),
-    });
-    await notify(sid(row.sellerId), "dispute", "Litige ouvert", req.body.reason, {
-      disputeId: sid(dispute._id),
-    });
+    const data = { disputeId: sid(dispute._id), orderId: sid(row._id) };
+    await notify(sid(row.buyerId), "dispute", "Litige ouvert", req.body.reason, data);
+    await notify(sid(row.sellerId), "dispute", "Litige ouvert", req.body.reason, data);
+    await notifyAdmins(
+      "dispute",
+      "Nouveau litige à traiter",
+      `${row.items?.[0]?.title || "Commande"} — ${req.body.reason}`,
+      data
+    );
     res.json({ id: sid(dispute._id), status: "open", reason: dispute.reason });
   })
 );
@@ -247,6 +279,16 @@ ordersRouter.post(
   ah(async (req, res) => {
     const row = await Order.findById(req.params.id);
     if (!row) throw notFound();
+    if (sid(row.buyerId) !== (req as AuthedRequest).userId) throw forbidden();
+    if (!["DELIVERED", "FUNDS_RELEASED", "FEEDBACK_PENDING"].includes(row.status)) {
+      throw badRequest("REVIEW_TOO_EARLY", "Tu pourras laisser un avis après la livraison.");
+    }
+    if (!row.items.some((i: any) => sid(i.listingId) === req.body.listingId)) {
+      throw badRequest("REVIEW_LISTING", "Cet article ne fait pas partie de la commande.");
+    }
+    if (await Review.exists({ orderId: row._id, buyerId: row.buyerId })) {
+      throw badRequest("ALREADY_REVIEWED", "Tu as déjà laissé un avis pour cette commande.");
+    }
     const review = await Review.create({
       listingId: req.body.listingId,
       orderId: row._id,

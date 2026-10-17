@@ -8,6 +8,7 @@ import { createRouteHandler } from "uploadthing/express";
 import { env } from "./config/env.js";
 import { errorHandler } from "./middleware/errors.js";
 import { requestLogger } from "./middleware/request-logger.js";
+import { maintenanceGuard } from "./middleware/maintenance.js";
 import { authRouter } from "./modules/auth.js";
 import { meRouter, orgRouter } from "./modules/me.js";
 import { catalogRouter } from "./modules/catalog.js";
@@ -66,6 +67,7 @@ export function createApp() {
   );
   app.use(compression());
   app.use("/api/v1/media", express.json({ limit: "16mb" }));
+  app.use("/api/v1/me/seller/tools/excel-import", express.json({ limit: "8mb" }));
   app.use(express.json({ limit: "1mb" }));
   app.use(requestLogger);
 
@@ -100,6 +102,7 @@ export function createApp() {
     res.status(ready ? 200 : 503).json({ ready });
   });
 
+  app.use(maintenanceGuard);
   app.use("/api/v1/auth/admin", authAdminRouter);
   app.use("/api/v1/auth", authRouter);
   app.get("/api/v1/me", requireAuth, (req, res) => {

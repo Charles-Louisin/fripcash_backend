@@ -16,7 +16,8 @@ import { toAdminUser, toListing, toMe } from "../serializers.js";
 import { getSettings, notify } from "../services/notify.js";
 import { hydrateOrder } from "../services/orders-hydrate.js";
 import { buildAdminStats } from "../services/stats.js";
-import { payoutOrderToSeller, refundOrderToBuyer, splitEscrow } from "../services/payments.js";
+import { normalizeOutcome, resolveDispute } from "../services/dispute-resolve.js";
+import { resetMaintenanceCache } from "../middleware/maintenance.js";
 import {
   buyerDisplayName,
   sellerDisplayName,
@@ -46,6 +47,24 @@ function serializeSettings(s: any) {
   };
 }
 
+async function audit(req: unknown, action: string, target: string, label: string, meta: object = {}) {
+  await AuditLog.create({
+    actorId: (req as AuthedRequest).userId,
+    action,
+    target,
+    meta: { ...meta, label },
+  });
+}
+
+const LISTING_STATUS_FR: Record<string, string> = {
+  ACTIVE: "publié",
+  DRAFT: "mis en brouillon",
+  ARCHIVED: "retiré",
+  REJECTED: "refusé",
+  FLAGGED: "signalé",
+  SOLD: "marqué vendu",
+};
+
 adminRouter.get(
   "/me",
   ah(async (req, res) => {
@@ -63,7 +82,7 @@ adminRouter.get(
 adminRouter.get(
   "/stats",
   ah(async (req, res) => {
-    const days = Math.min(90, Math.max(7, Number(req.query.days || 30)));
+    const days = Math.min(365, Math.max(7, Number(req.query.days || 30)));
     res.json(await buildAdminStats(days));
   })
 );
@@ -82,6 +101,7 @@ adminRouter.patch(
     const s = await getSettings();
     Object.assign(s, req.body);
     await s.save();
+    resetMaintenanceCache();
     await AuditLog.create({
       actorId: (req as AuthedRequest).userId,
       action: "settings.patch",
@@ -130,6 +150,13 @@ adminRouter.patch(
   ah(async (req, res) => {
     const row = await Listing.findByIdAndUpdate(req.params.id, req.body, { new: true });
     if (!row) throw notFound();
+    if (req.body.status) {
+      const verb = LISTING_STATUS_FR[req.body.status] || req.body.status;
+      await audit(req, "listing.patch", sid(row._id), `Article « ${row.title} » ${verb}`);
+      if (req.body.status === "ACTIVE" || req.body.status === "ARCHIVED" || req.body.status === "REJECTED") {
+        await notify(sid(row.sellerId), "listing", `Article ${verb}`, row.title, { listingId: sid(row._id) });
+      }
+    }
     res.json(toListing(row));
   })
 );
@@ -208,40 +235,20 @@ adminRouter.post(
     if (!d) throw notFound();
     const order = await Order.findById(d.orderId);
     if (!order) throw notFound();
-    const resolution = req.body.resolution || req.body.outcome;
-    const net = order.items.reduce((s: number, i: any) => s + (i.netPriceGnf || 0) * (i.quantity || 1), 0);
-    let savedByTransfer = false;
-    if (resolution === "resolved_buyer" || resolution === "refund_buyer") {
-      if (order.escrowStatus === "held" || order.escrowStatus === "refund_pending") {
-        await refundOrderToBuyer(order, net, "Litige — remboursement acheteur");
-        savedByTransfer = true;
-      } else {
-        order.status = "REFUNDED";
-        order.escrowStatus = "refunded";
-      }
-    } else if (resolution === "partial_refund") {
-      const buyerPct = Math.min(100, Math.max(0, Number(req.body.buyerPercent ?? 50)));
-      const sellerPct = Math.min(100, Math.max(0, Number(req.body.sellerPercent ?? 100 - buyerPct)));
-      const buyerAmt = Math.round((net * buyerPct) / 100);
-      const sellerAmt = Math.round((net * sellerPct) / 100);
-      await splitEscrow(order, buyerAmt, sellerAmt);
-      savedByTransfer = true;
-    } else {
-      if (order.escrowStatus === "held" || order.escrowStatus === "payout_pending") {
-        await payoutOrderToSeller(order, net, "Litige — libération vendeur");
-        savedByTransfer = true;
-      } else {
-        order.status = "FUNDS_RELEASED";
-        order.escrowStatus = "released";
-      }
-    }
-    d.status = "resolved";
-    d.resolution = resolution;
-    d.note = req.body.note || "";
-    await d.save();
-    if (!savedByTransfer) await order.save();
-    await notify(sid(order.buyerId), "dispute", "Litige résolu", resolution);
-    await notify(sid(order.sellerId), "dispute", "Litige résolu", resolution);
+    const resolution = normalizeOutcome(req.body.resolution || req.body.outcome);
+    await resolveDispute(d, order, resolution, {
+      actor: "admin",
+      actorId: (req as AuthedRequest).userId!,
+      buyerPercent: req.body.buyerPercent,
+      note: req.body.note,
+    });
+    await audit(
+      req,
+      "dispute.resolve",
+      sid(d._id),
+      `Litige « ${order.items?.[0]?.title || "commande"} » tranché`,
+      { resolution, buyerPercent: d.buyerPercent }
+    );
     res.json({ id: sid(d._id), status: d.status, resolution });
   })
 );
@@ -254,6 +261,13 @@ adminRouter.post(
     d.status = "under_review";
     if (req.body.note) d.note = req.body.note;
     await d.save();
+    const order = await Order.findById(d.orderId);
+    if (order) {
+      const data = { disputeId: sid(d._id), orderId: sid(order._id) };
+      const body = "L'équipe FripCash examine le litige.";
+      await notify(sid(order.buyerId), "dispute", "Litige en examen", body, data);
+      await notify(sid(order.sellerId), "dispute", "Litige en examen", body, data);
+    }
     res.json(await serializeDispute(d.toObject()));
   })
 );
@@ -274,6 +288,13 @@ adminRouter.post(
       createdAt: new Date(),
     } as any);
     await d.save();
+    const order = await Order.findById(d.orderId);
+    if (order) {
+      const data = { disputeId: sid(d._id), orderId: sid(order._id) };
+      const body = req.body.message || "Merci de répondre au litige et d'ajouter des preuves.";
+      await notify(sid(order.buyerId), "dispute", "Litige · Équipe FripCash", body, data);
+      await notify(sid(order.sellerId), "dispute", "Litige · Équipe FripCash", body, data);
+    }
     res.json(await serializeDispute(d.toObject()));
   })
 );
@@ -347,6 +368,7 @@ adminRouter.post(
     user.seller.verificationStatus = "approved";
     await user.save();
     await notify(sid(user._id), "shop", "Boutique validée", "Vous pouvez publier");
+    await audit(req, "seller.approve", sid(user._id), `Boutique « ${user.seller.shopName || user.name || "—"} » validée`);
     res.json(toMe(user));
   })
 );
@@ -360,6 +382,7 @@ adminRouter.post(
     user.seller.rejectionReason = req.body.reviewerNote || "";
     await user.save();
     await notify(sid(user._id), "shop", "Boutique refusée", req.body.reviewerNote || "");
+    await audit(req, "seller.reject", sid(user._id), `Boutique « ${user.seller.shopName || user.name || "—"} » refusée`);
     res.json(toMe(user));
   })
 );
@@ -678,6 +701,16 @@ adminRouter.patch(
     if (req.body.status === "unavailable") courier.isAvailable = false;
     user.markModified("courier");
     await user.save();
+    if (req.body.verificationStatus === "approved" || req.body.verificationStatus === "rejected") {
+      const ok = req.body.verificationStatus === "approved";
+      await audit(req, "courier.review", sid(user._id), `Dossier livreur de ${user.name || user.phone || "—"} ${ok ? "validé" : "refusé"}`);
+      await notify(
+        sid(user._id),
+        "courier",
+        ok ? "Dossier livreur validé" : "Dossier livreur refusé",
+        ok ? "Tu peux accepter des missions." : courier.rejectionReason || "Corrige ton dossier puis renvoie-le."
+      );
+    }
     const zoneIds = [
       ...new Set(
         [
@@ -737,7 +770,7 @@ adminRouter.put(
 adminRouter.get(
   "/rapports",
   ah(async (req, res) => {
-    const days = Math.min(90, Math.max(7, Number(req.query.days || 30)));
+    const days = Math.min(365, Math.max(7, Number(req.query.days || 30)));
     res.json(await buildAdminStats(days));
   })
 );
@@ -822,8 +855,17 @@ authAdminRouter.post(
     if (!user) throw notFound();
     user.isAdmin = role === "admin";
     if (role === "admin") user.authAudience = "ADMIN";
-    if (role === "courier") user.authAudience = "COURIER";
+    if (role === "courier" || role === "livreur") {
+      user.authAudience = "COURIER";
+      if (!user.courier?.verificationStatus) {
+        user.set("courier", { verificationStatus: "pending", isAvailable: false, zoneIds: [] });
+      }
+    }
+    if (role === "user" || role === "consumer" || role === "client") user.authAudience = "CONSUMER";
     await user.save();
+    await Session.deleteMany({ userId: user._id });
+    const roleFr = user.authAudience === "COURIER" ? "livreur" : user.authAudience === "ADMIN" ? "admin" : "client";
+    await audit(req, "user.set-role", sid(user._id), `${user.name || user.email || user.phone || "Compte"} passé ${roleFr}`, { role });
     res.json({ user: toAdminUser(user) });
   })
 );
@@ -855,6 +897,10 @@ authAdminRouter.post(
       { banned: true, banReason: req.body.banReason || "Banned by admin" },
       { new: true }
     );
+    if (user) {
+      await Session.deleteMany({ userId: user._id });
+      await audit(req, "user.ban", sid(user._id), `${user.name || user.email || user.phone || "Compte"} banni`);
+    }
     res.json({ user: user ? toAdminUser(user) : null });
   })
 );
@@ -867,6 +913,7 @@ authAdminRouter.post(
       { banned: false, banReason: null },
       { new: true }
     );
+    if (user) await audit(req, "user.unban", sid(user._id), `${user.name || user.email || user.phone || "Compte"} débanni`);
     res.json({ user: user ? toAdminUser(user) : null });
   })
 );
