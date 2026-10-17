@@ -120,6 +120,23 @@ offersRouter.patch(
   })
 );
 
+const COURIER_BUYER_CHAT = new Set([
+  "COLLECTED",
+  "IN_TRANSIT",
+  "DELIVERED",
+  "FUNDS_RELEASED",
+  "FEEDBACK_PENDING",
+  "DISPUTED",
+]);
+
+async function courierChatBlocked(conv: any, uid: string) {
+  if (!conv.orderId) return false;
+  const order = await Order.findById(conv.orderId).select("buyerId courierId status").lean();
+  if (!order || !order.courierId || sid(order.courierId) !== uid) return false;
+  const withBuyer = conv.participantIds.some((p: unknown) => sid(p) === sid(order.buyerId));
+  return withBuyer && !COURIER_BUYER_CHAT.has(String(order.status));
+}
+
 export const conversationsRouter = Router();
 conversationsRouter.use(requireAuth);
 
@@ -166,7 +183,13 @@ conversationsRouter.post(
       const sellerId = sid(order.sellerId);
       const courierId = order.courierId ? sid(order.courierId) : null;
       if (uid === courierId) {
-        otherId = req.body.with === "seller" ? sellerId : buyerId;
+        otherId = req.body.with === "buyer" ? buyerId : sellerId;
+        if (otherId === buyerId && !COURIER_BUYER_CHAT.has(String(order.status))) {
+          throw forbidden(
+            "CHAT_AFTER_PICKUP",
+            "Tu pourras écrire au client après avoir confirmé la collecte du colis."
+          );
+        }
       } else if (uid === buyerId || uid === sellerId) {
         otherId = uid === buyerId ? sellerId : buyerId;
       } else {
@@ -223,6 +246,12 @@ conversationsRouter.post(
     if (!conv) throw notFound();
     const uid = (req as AuthedRequest).userId!;
     if (!conv.participantIds.map((p) => sid(p)).includes(uid)) throw forbidden();
+    if (await courierChatBlocked(conv, uid)) {
+      throw forbidden(
+        "CHAT_AFTER_PICKUP",
+        "Tu pourras écrire au client après avoir confirmé la collecte du colis."
+      );
+    }
     const msg = await Message.create({
       conversationId: conv._id,
       senderId: uid,

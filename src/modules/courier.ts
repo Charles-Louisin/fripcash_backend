@@ -7,7 +7,7 @@ import { validate } from "../middleware/validate.js";
 import { ah } from "../utils/async-handler.js";
 import { badRequest, forbidden, notFound } from "../utils/http-error.js";
 import { sid } from "../utils/ids.js";
-import { hydrateOrder } from "../services/orders-hydrate.js";
+import { hydrateCourierOrder } from "../services/orders-hydrate.js";
 import { payCourierDeliveryFee } from "../services/payments.js";
 import { notifyOrderParties } from "../services/notify.js";
 import { announceCourierInChat } from "../services/courier-announce.js";
@@ -290,17 +290,19 @@ courierRouter.get(
     const visible = rows.filter((row) =>
       courierCoversZone(user.courier, row.pickupZoneId ? String(row.pickupZoneId) : null)
     );
-    res.json(await Promise.all(visible.map(hydrateOrder)));
+    const uid = (req as AuthedRequest).userId!;
+    res.json(await Promise.all(visible.map((row) => hydrateCourierOrder(row, uid))));
   })
 );
 
 courierRouter.get(
   "/missions",
   ah(async (req, res) => {
-    const rows = await Order.find({ courierId: (req as AuthedRequest).userId }).sort({
+    const uid = (req as AuthedRequest).userId!;
+    const rows = await Order.find({ courierId: uid }).sort({
       createdAt: -1,
     });
-    res.json(await Promise.all(rows.map(hydrateOrder)));
+    res.json(await Promise.all(rows.map((row) => hydrateCourierOrder(row, uid))));
   })
 );
 
@@ -324,8 +326,8 @@ courierRouter.post(
     row.timeline.push({ status: "COURIER_ASSIGNED", at: new Date() });
     await row.save();
     await announceCourierInChat(row, user);
-    await notifyOrderParties(row, "COURIER_ASSIGNED", `${user.name} a accepté la mission`);
-    res.json(await hydrateOrder(row));
+    await notifyOrderParties(row, "COURIER_ASSIGNED", `${user.name} a accepté la course`);
+    res.json(await hydrateCourierOrder(row, sid(user._id)));
   })
 );
 
@@ -344,6 +346,12 @@ courierRouter.post(
         `Étape suivante attendue : ${expected || "aucune"}`
       );
     }
+    if (req.body.status === "DELIVERED" && !row.buyerConfirmedAt) {
+      throw badRequest(
+        "BUYER_CONFIRMATION_REQUIRED",
+        "Le client doit d'abord appuyer sur « Colis reçu » dans son application avant que tu laisses le colis."
+      );
+    }
     row.status = req.body.status;
     row.timeline.push({ status: req.body.status, at: new Date() });
     if (req.body.status === "DELIVERED") {
@@ -352,7 +360,7 @@ courierRouter.post(
     }
     await row.save();
     await notifyOrderParties(row, req.body.status);
-    res.json(await hydrateOrder(row));
+    res.json(await hydrateCourierOrder(row, uid));
   })
 );
 
@@ -374,6 +382,6 @@ courierRouter.post(
     });
     await row.save();
     await announceCourierInChat(row, next);
-    res.json(await hydrateOrder(row));
+    res.json(await hydrateCourierOrder(row, (req as AuthedRequest).userId!));
   })
 );

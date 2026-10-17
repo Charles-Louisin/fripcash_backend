@@ -15,9 +15,14 @@ import {
   notifyCouriersForOrder,
   notifyOrderParties,
 } from "../services/notify.js";
-import { hydrateOrder } from "../services/orders-hydrate.js";
+import { hydrateCourierOrder, hydrateOrder } from "../services/orders-hydrate.js";
 import { buildSalesChart } from "../services/stats.js";
-import { payoutOrderToSeller, refundOrderToBuyer } from "../services/payments.js";
+import {
+  payCourierDeliveryFee,
+  payoutOrderToSeller,
+  refundOrderToBuyer,
+} from "../services/payments.js";
+import { User } from "../models/user.js";
 
 export const ordersRouter = Router();
 ordersRouter.use(requireAuth);
@@ -74,6 +79,10 @@ ordersRouter.get(
     const uid = (req as AuthedRequest).userId!;
     if (![sid(row.buyerId), sid(row.sellerId), sid(row.courierId)].includes(uid)) {
       if ((req as AuthedRequest).audience !== "ADMIN") throw forbidden();
+    }
+    if ((req as AuthedRequest).audience === "COURIER") {
+      res.json(await hydrateCourierOrder(row, uid));
+      return;
     }
     res.json(await hydrateOrder(row));
   })
@@ -173,11 +182,40 @@ ordersRouter.post(
     if (!confirmable.has(row.status) && (req as AuthedRequest).audience !== "ADMIN") {
       throw badRequest("ILLEGAL_TRANSITION", `Réception impossible depuis ${row.status}`);
     }
+    const firstConfirmation = !row.buyerConfirmedAt;
+    if (firstConfirmation) {
+      row.buyerConfirmedAt = new Date();
+      row.timeline.push({
+        status: "BUYER_CONFIRMED",
+        at: new Date(),
+        note: "Le client a appuyé sur « Colis reçu »",
+      });
+    }
     if (row.status !== "DELIVERED") {
       row.status = "DELIVERED";
       row.timeline.push({ status: "DELIVERED", at: new Date(), note: "Réception confirmée" });
-      await row.save();
-      await notifyOrderParties(row, "DELIVERED", "L'acheteur a confirmé la réception.");
+    }
+    let courier: any = null;
+    if (firstConfirmation && row.courierId) {
+      courier = await User.findById(row.courierId);
+      if (courier) await payCourierDeliveryFee(row, courier);
+    }
+    await row.save();
+    if (firstConfirmation) {
+      await notifyOrderParties(
+        { _id: row._id, buyerId: row.buyerId, sellerId: row.sellerId },
+        "DELIVERED",
+        "L'acheteur a confirmé la réception."
+      );
+      if (courier) {
+        await notify(
+          sid(courier._id),
+          "order",
+          "Réception confirmée par le client",
+          `${(row.address as any)?.name || "Le client"} a appuyé sur « Colis reçu ». Tu peux laisser le colis : la course est terminée.`,
+          { orderId: sid(row._id), status: "DELIVERED" }
+        );
+      }
     }
     if (row.escrowStatus === "held" || row.escrowStatus === "payout_pending") {
       await payoutOrderToSeller(row, orderNet(row), "Libération séquestre FripCash");

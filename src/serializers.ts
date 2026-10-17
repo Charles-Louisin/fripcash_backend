@@ -245,6 +245,7 @@ export function toOrder(doc: any, extras: Record<string, unknown> = {}) {
     originalAmountGnf: doc.originalAmountGnf ?? doc.amountGnf,
     offerStatus: doc.offerStatus || "none",
     courierName: doc.courierName,
+    buyerConfirmedAt: doc.buyerConfirmedAt || null,
     timeline: doc.timeline,
     address: doc.address,
     createdAt: doc.createdAt,

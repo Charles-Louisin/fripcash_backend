@@ -59,6 +59,7 @@ const orderSchema = new Schema(
       default: "none",
     },
     courierName: { type: String, default: null },
+    buyerConfirmedAt: { type: Date, default: null },
     timeline: {
       type: [{ status: String, at: Date, note: String }],
       default: [],

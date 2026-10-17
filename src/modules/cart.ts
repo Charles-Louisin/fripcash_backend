@@ -388,6 +388,7 @@ checkoutRouter.post(
           address: {
             line: body.address,
             city: body.city,
+            zoneId: body.toZoneId || body.zoneId || null,
             phone: deliveryPhone.e164,
             name: body.name,
             email: body.email.trim(),
