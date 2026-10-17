@@ -4,7 +4,7 @@ import { z } from "zod";
 import { User } from "../models/user.js";
 import { Session } from "../models/auth.js";
 import { Listing } from "../models/listing.js";
-import { Order, Ledger } from "../models/commerce.js";
+import { Order, Ledger, Wallet } from "../models/commerce.js";
 import { Comment, Review } from "../models/social.js";
 import { AuditLog, Dispute, OrgKyc, Report } from "../models/ops.js";
 import { DeliveryTariff, Partner, Zone } from "../models/catalog.js";
@@ -425,7 +425,31 @@ adminRouter.post("/comments/:id/hide", ah(async (req, res) => {
 adminRouter.get(
   "/wallets",
   ah(async (_req, res) => {
-    res.json([]);
+    const wallets = await Wallet.find().sort({ availableGnf: -1 }).limit(500).lean();
+    const users = await User.find({ _id: { $in: wallets.map((w) => w.userId) } })
+      .select("name email phone seller.shopName seller.kind seller.shopKind")
+      .lean();
+    const byId = new Map(users.map((u) => [String(u._id), u]));
+    res.json(
+      wallets.map((w) => {
+        const u = byId.get(String(w.userId));
+        return {
+          id: sid(w._id),
+          userId: sid(w.userId),
+          availableGnf: w.availableGnf || 0,
+          reservedGnf: w.reservedGnf || 0,
+          user: u
+            ? {
+                name: u.seller?.shopName || u.name || u.email || u.phone || "",
+                email: u.email || null,
+                phone: u.phone || null,
+                kind: u.seller?.kind || null,
+                shopKind: u.seller?.shopKind || null,
+              }
+            : null,
+        };
+      })
+    );
   })
 );
 
