@@ -135,14 +135,13 @@ meRouter.post(
     const user = (req as AuthedRequest).userDoc!;
     const shopKind = req.body.shopKind.toLowerCase() as "standard" | "proximite" | "enseigne";
     const needsReview = shopKind === "proximite" || shopKind === "enseigne";
-    const pendingSameKind =
-      user.seller?.kind === "boutique" &&
-      user.seller.shopKind === shopKind &&
-      user.seller.verificationStatus === "pending";
+    const sameKind = user.seller?.kind === "boutique" && user.seller.shopKind === shopKind;
+    const emptyShop = !(user.seller?.kycDocuments?.length);
     if (
       user.seller?.kind === "boutique" &&
       user.seller.verificationStatus !== "rejected" &&
-      !pendingSameKind
+      !sameKind &&
+      !emptyShop
     ) {
       throw badRequest(
         "ALREADY_SHOP",

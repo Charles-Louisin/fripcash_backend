@@ -33,6 +33,8 @@ export const env = {
   corsOrigin: process.env.CORS_ORIGIN || "http://localhost:3000",
   publicApiUrl: (process.env.PUBLIC_API_URL || "").replace(/\/$/, ""),
   otpDevEcho: !isProduction && (process.env.OTP_DEV_ECHO ?? "true") !== "false",
+  /** Aucun fournisseur SMS n'est branché : le code téléphone est 000000 tant que ce n'est pas désactivé. */
+  otpSimulated: (process.env.OTP_SIMULATED ?? "true") !== "false",
   rateLimitMax: Number(process.env.RATE_LIMIT_MAX ?? (isProduction ? 400 : 2000)),
   rateLimitWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS ?? 60_000),
   uploadthingToken: process.env.UPLOADTHING_TOKEN || "",

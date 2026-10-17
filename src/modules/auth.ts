@@ -64,11 +64,12 @@ async function issue(
   return token;
 }
 
-async function issueEmailVerificationCode(
-  user: InstanceType<typeof User>
-) {
-  if (!user.email || user.emailVerified) return null;
-  const code = isDev && env.otpDevEcho ? "000000" : randomDigits(6);
+const SIMULATED_CODE = "000000";
+
+const showCode = (emailSent: boolean) =>
+  env.otpDevEcho || (!emailSent && env.otpSimulated);
+
+async function storeEmailCode(user: InstanceType<typeof User>, code: string) {
   await AuthToken.deleteMany({ userId: user._id, kind: "email_verify" });
   await AuthToken.create({
     userId: user._id,
@@ -76,6 +77,13 @@ async function issueEmailVerificationCode(
     kind: "email_verify",
     expiresAt: new Date(Date.now() + 15 * 60 * 1000),
   });
+}
+
+/** Ne lève jamais : un e-mail non parti ne doit pas annuler une inscription déjà enregistrée. */
+async function issueEmailVerificationCode(user: InstanceType<typeof User>) {
+  if (!user.email || user.emailVerified) return { code: null, sent: false };
+  const code = isDev && env.otpDevEcho ? SIMULATED_CODE : randomDigits(6);
+  await storeEmailCode(user, code);
   try {
     await sendEmail({
       to: user.email,
@@ -83,12 +91,16 @@ async function issueEmailVerificationCode(
       html: verificationEmailHtml(user.name || "", code),
       text: `Ton code FripCash : ${code}`,
     });
+    logger.info({ email: user.email }, "Code email émis");
+    return { code, sent: true };
   } catch (err) {
     logger.error({ err, email: user.email }, "Envoi du code email impossible");
-    if (!isDev) throw err;
+    if (env.otpSimulated) {
+      await storeEmailCode(user, SIMULATED_CODE);
+      return { code: SIMULATED_CODE, sent: false };
+    }
+    return { code, sent: false };
   }
-  logger.info({ email: user.email, echoed: env.otpDevEcho }, "Code email émis");
-  return code;
 }
 
 authRouter.post(
@@ -96,7 +108,8 @@ authRouter.post(
   validate(z.object({ phoneNumber: z.string().min(6) })),
   ah(async (req, res) => {
     const phone = String(req.body.phoneNumber).replace(/\s/g, "");
-    const code = isDev && env.otpDevEcho ? "000000" : randomDigits(6);
+    const simulated = env.otpSimulated || (isDev && env.otpDevEcho);
+    const code = simulated ? SIMULATED_CODE : randomDigits(6);
     await OtpCode.deleteMany({ phone });
     await OtpCode.create({
       phone,
@@ -104,8 +117,8 @@ authRouter.post(
       expiresAt: new Date(Date.now() + 10 * 60 * 1000),
     });
     res.json({
-      message: "OTP envoyé",
-      ...(env.otpDevEcho ? { code } : {}),
+      message: simulated ? "Code simulé : saisis 000000" : "OTP envoyé",
+      ...(simulated ? { code, simulated: true } : {}),
     });
   })
 );
@@ -202,11 +215,12 @@ authRouter.post(
     applySignupRole(user, req.body.signupRole, user.shippingZoneId);
     await user.save();
     const token = await issue(req, user, audienceForUser(user));
-    const code = await issueEmailVerificationCode(user);
+    const mail = await issueEmailVerificationCode(user);
     res.json({
       token,
       user: toAuthUser(user),
-      ...(env.otpDevEcho && code ? { verificationCode: code } : {}),
+      emailSent: mail.sent,
+      ...(showCode(mail.sent) && mail.code ? { verificationCode: mail.code } : {}),
     });
   })
 );
@@ -226,18 +240,18 @@ authRouter.post(
     const aud = audienceForUser(user);
     const token = await issue(req, user, aud);
     let verificationCode: string | null = null;
+    let emailSent = true;
     if (user.email && !user.emailVerified) {
-      try {
-        verificationCode = await issueEmailVerificationCode(user);
-      } catch (err) {
-        logger.error({ err, email: user.email }, "Code email non envoyé — connexion conservée");
-      }
+      const email = await issueEmailVerificationCode(user);
+      verificationCode = email.code;
+      emailSent = email.sent;
     }
     res.json({
       token,
       user: toAuthUser(user),
       session: { token },
-      ...(env.otpDevEcho && verificationCode
+      emailSent,
+      ...(showCode(emailSent) && verificationCode
         ? { verificationCode }
         : {}),
     });
@@ -294,10 +308,13 @@ authRouter.post(
     if (user.emailVerified) {
       return res.json({ message: "Email déjà confirmé" });
     }
-    const code = await issueEmailVerificationCode(user);
+    const email = await issueEmailVerificationCode(user);
     res.json({
-      message: "Code de vérification envoyé",
-      ...(env.otpDevEcho && code ? { code } : {}),
+      message: email.sent
+        ? "Code de vérification envoyé"
+        : "L’e-mail n’a pas pu partir.",
+      emailSent: email.sent,
+      ...(showCode(email.sent) && email.code ? { code: email.code } : {}),
     });
   })
 );
