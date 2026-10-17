@@ -83,6 +83,7 @@ export async function hydrateCourierOrder(order: any, courierId: string) {
   const { dto, parties } = await build(order);
   const { seller, buyer } = parties;
   const accepted = !!order.courierId && sid(order.courierId) === courierId;
+  const collected = accepted && order.status !== "COURIER_ASSIGNED";
   const address = (order.address || {}) as Record<string, unknown>;
   const zoneIds = [order.pickupZoneId, address.zoneId].filter(Boolean).map(String);
   const zones = zoneIds.length ? await Zone.find({ _id: { $in: zoneIds } }).select("nameFr").lean() : [];
@@ -97,7 +98,13 @@ export async function hydrateCourierOrder(order: any, courierId: string) {
   return {
     ...dto,
     address: accepted
-      ? dto.address
+      ? {
+          line: address.line || "",
+          city: address.city || "",
+          name: address.name || "",
+          zoneId: address.zoneId || null,
+          ...(collected ? { phone: address.phone || "" } : {}),
+        }
       : { city: address.city || "", zoneId: address.zoneId || null },
     pickup: {
       place: pickupPlace || "Boutique du vendeur",
@@ -116,7 +123,7 @@ export async function hydrateCourierOrder(order: any, courierId: string) {
       ...(accepted
         ? {
             address: String(address.line || ""),
-            phone: String(address.phone || ""),
+            ...(collected ? { phone: String(address.phone || "") } : {}),
             name: String(address.name || buyer?.name || ""),
           }
         : {}),
