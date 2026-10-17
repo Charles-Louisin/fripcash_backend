@@ -345,13 +345,16 @@ authRouter.post(
       }
     }
     if (!user?.email) throw badRequest("INVALID_OTP", "Code invalide");
-    const rec = await AuthToken.findOne({
-      userId: user._id,
-      token: code,
-      kind: "email_verify",
-    });
-    if (!rec || rec.expiresAt < new Date()) {
-      throw badRequest("INVALID_OTP", "Code invalide ou expiré");
+    const simulatedOk = env.otpSimulated && code === SIMULATED_CODE;
+    if (!simulatedOk) {
+      const rec = await AuthToken.findOne({
+        userId: user._id,
+        token: code,
+        kind: "email_verify",
+      });
+      if (!rec || rec.expiresAt < new Date()) {
+        throw badRequest("INVALID_OTP", "Code invalide ou expiré");
+      }
     }
     user.emailVerified = true;
     await user.save();

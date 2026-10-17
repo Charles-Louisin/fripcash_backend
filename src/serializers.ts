@@ -39,6 +39,7 @@ export function toMe(user: InstanceType<typeof User>) {
     preferredLocale: user.preferredLocale || "FR",
     canBuy: user.canBuy && user.authAudience === "CONSUMER",
     emailVerified: !!user.emailVerified,
+    phoneNumberVerified: !!user.phoneNumberVerified,
     avatarUrl: (user as any).avatarUrl || "",
     city: (user as any).city || "",
     bio: (user as any).bio || user.seller?.bio || "",

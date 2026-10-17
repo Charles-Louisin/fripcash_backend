@@ -771,6 +771,7 @@ authAdminRouter.post(
       passwordHash: await bcrypt.hash(req.body.password, 10),
       authAudience: audience,
       isAdmin: role === "admin",
+      emailVerified: true,
       courier:
         audience === "COURIER"
           ? { verificationStatus: "approved", isAvailable: false }
