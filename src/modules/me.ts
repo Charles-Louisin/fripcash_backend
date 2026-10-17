@@ -394,7 +394,7 @@ meRouter.post(
     res.json({
       status: "queued",
       objectKey: req.body.objectKey,
-      message: "Import enregistré — créez les annonces depuis le fichier UploadThing côté UI",
+      message: "Fichier enregistré sur UploadThing.",
     });
   })
 );

@@ -100,7 +100,7 @@ const paymentSchema = new Schema(
     notifyToken: { type: String, default: "" },
     kind: {
       type: String,
-      enum: ["payment", "payout", "refund", "withdrawal"],
+      enum: ["payment", "payout", "refund", "withdrawal", "delivery", "split"],
       required: true,
       index: true,
     },

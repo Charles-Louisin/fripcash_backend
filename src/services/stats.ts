@@ -1,5 +1,5 @@
 import { Category } from "../models/catalog.js";
-import { Order, Wallet } from "../models/commerce.js";
+import { Order } from "../models/commerce.js";
 import { Listing } from "../models/listing.js";
 import { AuditLog, Dispute } from "../models/ops.js";
 import { Review } from "../models/social.js";
@@ -86,7 +86,7 @@ export async function buildAdminStats(days = 30) {
   monthStart.setDate(1);
   monthStart.setHours(0, 0, 0, 0);
 
-  const [listings, orders, users, disputes, auditLogs, categories, settings, wallets] =
+  const [listings, orders, users, disputes, auditLogs, categories, settings] =
     await Promise.all([
       Listing.find().sort({ createdAt: -1 }).lean(),
       Order.find().sort({ createdAt: -1 }).lean(),
@@ -95,7 +95,6 @@ export async function buildAdminStats(days = 30) {
       AuditLog.find().sort({ createdAt: -1 }).limit(30).lean(),
       Category.find().lean(),
       getSettings(),
-      Wallet.find().lean(),
     ]);
 
   const userById = new Map(users.map((u) => [String(u._id), u]));
@@ -269,7 +268,9 @@ export async function buildAdminStats(days = 30) {
     return toListing(l, seller);
   });
 
-  const reservedWallets = wallets.reduce((s, w) => s + (w.reservedGnf || 0), 0);
+  const reservedWallets = orders
+    .filter((o) => ["held", "payout_pending", "refund_pending"].includes(String(o.escrowStatus)))
+    .reduce((s, o) => s + (o.items || []).reduce((n: number, i: any) => n + (i.netPriceGnf || 0) * (i.quantity || 1), 0), 0);
 
   return {
     totalListings: listings.length,

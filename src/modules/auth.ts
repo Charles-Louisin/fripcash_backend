@@ -13,7 +13,6 @@ import { toAuthUser, toMe } from "../serializers.js";
 import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 import { validate } from "../middleware/validate.js";
 import { createSession, revokeAllSessions, revokeSession } from "../services/session.js";
-import { getOrCreateWallet } from "../services/wallet.js";
 import {
   sendEmail,
   verificationEmailHtml,
@@ -62,7 +61,6 @@ async function issue(
     ip: req.ip,
     userAgent: req.header("user-agent"),
   });
-  await getOrCreateWallet(String(user._id));
   return token;
 }
 
@@ -203,7 +201,7 @@ authRouter.post(
     }
     applySignupRole(user, req.body.signupRole, user.shippingZoneId);
     await user.save();
-    const token = await issue(req, user, "CONSUMER");
+    const token = await issue(req, user, audienceForUser(user));
     const code = await issueEmailVerificationCode(user);
     res.json({
       token,

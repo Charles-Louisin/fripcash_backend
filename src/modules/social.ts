@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { Listing } from "../models/listing.js";
+import { Order } from "../models/commerce.js";
 import {
   Conversation,
   Favorite,
@@ -154,6 +155,14 @@ conversationsRouter.post(
       if (!listing) throw notFound();
       otherId = sid(listing.sellerId);
     }
+    if (!otherId && req.body.orderId) {
+      const order = await Order.findById(req.body.orderId);
+      if (!order) throw notFound();
+      const buyerId = sid(order.buyerId);
+      const sellerId = sid(order.sellerId);
+      if (uid !== buyerId && uid !== sellerId) throw forbidden();
+      otherId = uid === buyerId ? sellerId : buyerId;
+    }
     if (!otherId) throw badRequest("NO_PEER", "Destinataire manquant");
     let conv = req.body.orderId
       ? await Conversation.findOne({
@@ -188,6 +197,8 @@ conversationsRouter.get(
         id: sid(m._id),
         senderId: sid(m.senderId),
         body: m.body,
+        kind: m.kind || "text",
+        meta: m.meta || null,
         createdAt: m.createdAt,
       }))
     );

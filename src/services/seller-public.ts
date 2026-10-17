@@ -5,7 +5,8 @@ import { toListing } from "../serializers.js";
 
 export async function reviewStatsForSellers(ids: unknown[]) {
   const objectIds = ids.filter(Boolean);
-  if (!objectIds.length) return new Map<string, { rating: number; reviewsCount: number }>();
+  if (!objectIds.length)
+    return new Map<string, { rating: number; reviewsCount: number }>();
   const rows = await Review.aggregate([
     { $match: { sellerId: { $in: objectIds }, hidden: { $ne: true } } },
     {
@@ -23,13 +24,14 @@ export async function reviewStatsForSellers(ids: unknown[]) {
         rating: Math.round((r.rating || 0) * 10) / 10,
         reviewsCount: r.reviewsCount || 0,
       },
-    ])
+    ]),
   );
 }
 
 export async function reviewStatsForListings(ids: unknown[]) {
   const objectIds = ids.filter(Boolean);
-  if (!objectIds.length) return new Map<string, { rating: number; reviewsCount: number }>();
+  if (!objectIds.length)
+    return new Map<string, { rating: number; reviewsCount: number }>();
   const rows = await Review.aggregate([
     { $match: { listingId: { $in: objectIds }, hidden: { $ne: true } } },
     {
@@ -47,14 +49,14 @@ export async function reviewStatsForListings(ids: unknown[]) {
         rating: Math.round((r.rating || 0) * 10) / 10,
         reviewsCount: r.reviewsCount || 0,
       },
-    ])
+    ]),
   );
 }
 
 export function toPublicShop(
   user: any,
   stats?: { rating: number; reviewsCount: number },
-  extras: Record<string, unknown> = {}
+  extras: Record<string, unknown> = {},
 ) {
   return {
     id: sid(user._id),

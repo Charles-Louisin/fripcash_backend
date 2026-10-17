@@ -7,6 +7,7 @@ export const SIGNUP_ROLES = [
   "boutique",
   "commerceLocal",
   "grandeSurface",
+  "livreur",
 ] as const;
 
 export type SignupRole = (typeof SIGNUP_ROLES)[number];
@@ -18,6 +19,23 @@ export function applySignupRole(
 ) {
   if (shippingZoneId) (user as any).shippingZoneId = shippingZoneId;
   if (!role || role === "acheteur") return user;
+
+  if (role === "livreur") {
+    user.authAudience = "COURIER";
+    user.canBuy = false;
+    user.courier = {
+      verificationStatus: "none",
+      isAvailable: false,
+      zoneId: null,
+      zoneIds: [],
+      vehicle: "",
+      plate: "",
+      portraitUrl: "",
+      vehiclePhotoUrl: "",
+      rejectionReason: "",
+    } as any;
+    return user;
+  }
 
   if (role === "particulier") {
     user.seller = {

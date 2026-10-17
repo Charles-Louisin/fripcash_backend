@@ -4,7 +4,7 @@ import { z } from "zod";
 import { User } from "../models/user.js";
 import { Session } from "../models/auth.js";
 import { Listing } from "../models/listing.js";
-import { Order, Ledger, Wallet } from "../models/commerce.js";
+import { Order, Ledger } from "../models/commerce.js";
 import { Comment, Review } from "../models/social.js";
 import { AuditLog, Dispute, OrgKyc, Report } from "../models/ops.js";
 import { DeliveryTariff, Partner, Zone } from "../models/catalog.js";
@@ -16,8 +16,7 @@ import { toAdminUser, toListing, toMe } from "../serializers.js";
 import { getSettings, notify } from "../services/notify.js";
 import { hydrateOrder } from "../services/orders-hydrate.js";
 import { buildAdminStats } from "../services/stats.js";
-import { payoutOrderToSeller, refundOrderToBuyer } from "../services/payments.js";
-import { getOrCreateWallet, refundEscrow, releaseEscrow } from "../services/wallet.js";
+import { payoutOrderToSeller, refundOrderToBuyer, splitEscrow } from "../services/payments.js";
 import {
   buyerDisplayName,
   sellerDisplayName,
@@ -225,17 +224,8 @@ adminRouter.post(
       const sellerPct = Math.min(100, Math.max(0, Number(req.body.sellerPercent ?? 100 - buyerPct)));
       const buyerAmt = Math.round((net * buyerPct) / 100);
       const sellerAmt = Math.round((net * sellerPct) / 100);
-      if (order.escrowStatus === "held") {
-        if (buyerAmt > 0) {
-          await refundEscrow(sid(order.sellerId), sid(order.buyerId), buyerAmt, sid(order._id));
-          const buyerWallet = await getOrCreateWallet(sid(order.buyerId));
-          buyerWallet.availableGnf += buyerAmt;
-          await buyerWallet.save();
-        }
-        if (sellerAmt > 0) await releaseEscrow(sid(order.sellerId), sellerAmt, sid(order._id));
-      }
-      order.status = "FUNDS_RELEASED";
-      order.escrowStatus = "released";
+      await splitEscrow(order, buyerAmt, sellerAmt);
+      savedByTransfer = true;
     } else {
       if (order.escrowStatus === "held" || order.escrowStatus === "payout_pending") {
         await payoutOrderToSeller(order, net, "Litige — libération vendeur");
@@ -435,27 +425,7 @@ adminRouter.post("/comments/:id/hide", ah(async (req, res) => {
 adminRouter.get(
   "/wallets",
   ah(async (_req, res) => {
-    const rows = await Wallet.find().populate("userId", "name email phone seller").lean();
-    res.json(
-      rows.map((w) => {
-        const u: any = w.userId;
-        const userDoc = u && typeof u === "object" && u.name !== undefined ? u : null;
-        return {
-          id: sid(w._id),
-          userId: sid(userDoc?._id || w.userId),
-          user: userDoc
-            ? {
-                id: sid(userDoc._id),
-                name: userDoc.name || userDoc.seller?.shopName || "Utilisateur",
-                email: userDoc.email || "",
-                phone: userDoc.phone || "",
-              }
-            : null,
-          availableGnf: w.availableGnf,
-          reservedGnf: w.reservedGnf,
-        };
-      })
-    );
+    res.json([]);
   })
 );
 
@@ -597,6 +567,18 @@ adminRouter.get(
           phone: u.phone,
           isAvailable: !!u.courier?.isAvailable,
           vehicleType: u.courier?.vehicle || "",
+          plate: u.courier?.plate || "",
+          verificationStatus: u.courier?.verificationStatus || "none",
+          portraitUrl: u.courier?.portraitUrl || u.avatarUrl || "",
+          vehiclePhotoUrl: u.courier?.vehiclePhotoUrl || "",
+          rejectionReason: u.courier?.rejectionReason || "",
+          identityDocuments: (u.kyc?.documents || [])
+            .filter((doc: { documentType?: string | null }) => doc.documentType === "identity")
+            .map((doc: { url?: string | null; mimeType?: string | null; name?: string | null }) => ({
+              url: doc.url || "",
+              mimeType: doc.mimeType || "",
+              name: doc.name || "",
+            })),
           zoneId: u.courier?.zoneId ? sid(u.courier.zoneId) : null,
           zoneIds: [
             ...new Set(
@@ -655,6 +637,18 @@ adminRouter.patch(
     }
     if (typeof req.body.isAvailable === "boolean") {
       courier.isAvailable = req.body.isAvailable;
+    }
+    if (req.body.verificationStatus === "approved" || req.body.verificationStatus === "rejected") {
+      courier.verificationStatus = req.body.verificationStatus;
+      courier.rejectionReason =
+        req.body.verificationStatus === "rejected" ? String(req.body.rejectionReason || "").slice(0, 500) : "";
+      if (req.body.verificationStatus === "rejected") courier.isAvailable = false;
+      user.kyc = {
+        status: req.body.verificationStatus,
+        note: courier.rejectionReason,
+        documents: user.kyc?.documents || [],
+      } as any;
+      user.markModified("kyc");
     }
     if (req.body.status === "available") courier.isAvailable = true;
     if (req.body.status === "unavailable") courier.isAvailable = false;

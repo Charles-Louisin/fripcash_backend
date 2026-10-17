@@ -11,7 +11,6 @@ import { sid } from "../utils/ids.js";
 import { notify, notifyCouriersForOrder, notifyOrderParties } from "../services/notify.js";
 import { hydrateOrder } from "../services/orders-hydrate.js";
 import { buildSalesChart } from "../services/stats.js";
-import { holdEscrow } from "../services/wallet.js";
 import { payoutOrderToSeller, refundOrderToBuyer } from "../services/payments.js";
 
 export const ordersRouter = Router();
@@ -341,12 +340,6 @@ ordersRouter.post(
     }
     const original = row.originalAmountGnf || row.amountGnf;
     const complement = Math.max(0, original - (row.amountGnf || 0));
-    const origNet = orderNet(row);
-    const scale = row.amountGnf > 0 ? original / row.amountGnf : 1;
-    const complementNet = Math.max(0, Math.round(origNet * scale - origNet));
-    if (complementNet > 0 && row.escrowStatus === "held") {
-      await holdEscrow(sid(row.sellerId), complementNet, sid(row._id));
-    }
     row.amountGnf = original;
     row.offerStatus = "accepted";
     row.timeline.push({

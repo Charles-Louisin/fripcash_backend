@@ -78,6 +78,9 @@ const courierSchema = new Schema(
     zoneIds: [{ type: Schema.Types.ObjectId, ref: "Zone" }],
     vehicle: { type: String, default: "" },
     plate: { type: String, default: "" },
+    portraitUrl: { type: String, default: "" },
+    vehiclePhotoUrl: { type: String, default: "" },
+    rejectionReason: { type: String, default: "" },
   },
   { _id: false }
 );
@@ -119,6 +122,7 @@ const userSchema = new Schema(
           storageKey: String,
           url: String,
           mimeType: String,
+          name: String,
         },
       ],
     },

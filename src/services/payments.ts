@@ -7,13 +7,6 @@ import { sid } from "../utils/ids.js";
 import { logger } from "../utils/logger.js";
 import { notifyOrderParties } from "./notify.js";
 import {
-  addLedger,
-  getOrCreateWallet,
-  holdEscrow,
-  refundEscrow,
-  releaseEscrow,
-} from "./wallet.js";
-import {
   cinetpayNotifyUrl,
   getCinetPayPayment,
   getCinetPayTransfer,
@@ -25,10 +18,10 @@ import {
   type CinetPayApiResult,
   type CinetPayMethod,
 } from "./cinetpay.js";
-import { parseGnMobile, requireGnMobile, type GnOperator } from "./gn-phone.js";
+import { parseGnMobile, type GnOperator } from "./gn-phone.js";
 
-export const MIN_PAYMENT_GNF = 300;
 export const MIN_TRANSFER_GNF = 500;
+export const MIN_PAYMENT_GNF = MIN_TRANSFER_GNF;
 
 function newMerchantId() {
   return `fc${new mongoose.Types.ObjectId().toString()}`;
@@ -95,9 +88,7 @@ export async function settleInboundPayment(payment: any, result: CinetPayApiResu
     const orders = await Order.find({ _id: { $in: payment.orderIds } });
     for (const order of orders) {
       if (order.status !== "ORDERED" && order.escrowStatus !== "pending") continue;
-      const net = orderNet(order);
       if (order.escrowStatus !== "held") {
-        await holdEscrow(sid(order.sellerId), net, sid(order._id));
         order.escrowStatus = "held";
       }
       order.status = "SELLER_NOTIFIED";
@@ -158,11 +149,6 @@ async function settleOutbound(payment: any, result: CinetPayApiResult) {
     payment.status = next === "expired" ? "expired" : "failed";
     payment.processedAt = new Date();
     await payment.save();
-    if (payment.kind === "withdrawal" && payment.userId) {
-      const wallet = await getOrCreateWallet(sid(payment.userId));
-      wallet.availableGnf += payment.amountGnf;
-      await wallet.save();
-    }
     if (payment.kind === "payout" || payment.kind === "refund") {
       const orders = await Order.find({ _id: { $in: payment.orderIds } });
       for (const order of orders) {
@@ -184,24 +170,13 @@ async function settleOutbound(payment: any, result: CinetPayApiResult) {
   payment.processedAt = new Date();
   await payment.save();
 
-  if (payment.kind === "withdrawal" && payment.userId) {
-    await addLedger({
-      userId: sid(payment.userId),
-      type: "withdrawal",
-      amountGnf: payment.amountGnf,
-      isCredit: false,
-      label: "Retrait Mobile Money",
-    });
+  if (payment.kind === "withdrawal" || payment.kind === "delivery" || payment.kind === "split") {
     return payment;
   }
 
   const orders = await Order.find({ _id: { $in: payment.orderIds } });
   for (const order of orders) {
-    const net = orderNet(order);
     if (payment.kind === "payout") {
-      if (order.escrowStatus === "held" || order.escrowStatus === "payout_pending") {
-        await releaseEscrow(sid(order.sellerId), Math.min(payment.amountGnf, net), sid(order._id));
-      }
       order.escrowStatus = "released";
       order.status = "FUNDS_RELEASED";
       order.timeline.push({
@@ -213,14 +188,6 @@ async function settleOutbound(payment: any, result: CinetPayApiResult) {
       await notifyOrderParties(order, "FUNDS_RELEASED", "Les fonds ont été libérés");
     }
     if (payment.kind === "refund") {
-      if (order.escrowStatus === "held" || order.escrowStatus === "refund_pending") {
-        await refundEscrow(
-          sid(order.sellerId),
-          sid(order.buyerId),
-          Math.min(payment.amountGnf, net),
-          sid(order._id)
-        );
-      }
       order.escrowStatus = "refunded";
       order.status = "REFUNDED";
       order.timeline.push({
@@ -306,7 +273,7 @@ function sellerPayoutPhone(seller: any): { e164: string; operator: GnOperator } 
 }
 
 async function startTransfer(input: {
-  kind: "payout" | "refund" | "withdrawal";
+  kind: "payout" | "refund" | "withdrawal" | "delivery" | "split";
   amountGnf: number;
   method: GnOperator;
   phoneE164: string;
@@ -367,9 +334,8 @@ export async function payoutOrderToSeller(
   order: any,
   amountGnf: number,
   reason: string,
-  opts: { finalize?: boolean } = {}
+  _opts: { finalize?: boolean } = {}
 ) {
-  const finalize = opts.finalize !== false;
   if (order.escrowStatus === "released") return { mode: "already" as const };
   if (order.escrowStatus === "payout_pending" && order.payoutMerchantId) {
     const existing = await refreshPayment(order.payoutMerchantId);
@@ -380,21 +346,10 @@ export async function payoutOrderToSeller(
   }
   const amount = Math.round(amountGnf);
   if (amount < MIN_TRANSFER_GNF) {
-    if (order.escrowStatus === "held") {
-      await releaseEscrow(sid(order.sellerId), amount, sid(order._id));
-    }
-    if (finalize) {
-      order.escrowStatus = "released";
-      order.status = "FUNDS_RELEASED";
-      order.timeline.push({
-        status: "FUNDS_RELEASED",
-        at: new Date(),
-        note: `Fonds crédités au portefeuille (montant < ${MIN_TRANSFER_GNF} GNF)`,
-      });
-      await notifyOrderParties(order, "FUNDS_RELEASED", "Les fonds ont été libérés");
-    }
-    await order.save();
-    return { mode: "wallet" as const };
+    throw badRequest(
+      "MIN_TRANSFER",
+      `Le versement Mobile Money minimum est de ${MIN_TRANSFER_GNF} GNF. Les fonds restent en séquestre.`
+    );
   }
   const seller = await User.findById(order.sellerId);
   if (!seller) throw notFound("Vendeur introuvable");
@@ -437,27 +392,17 @@ export async function refundOrderToBuyer(
   const phone = inbound?.phoneE164 || order.address?.paymentPhone || order.address?.phone;
   const parsed = phone ? parseGnMobile(String(phone)) : null;
 
-  if (amount < MIN_TRANSFER_GNF || !parsed) {
-    if (order.escrowStatus === "held") {
-      await refundEscrow(sid(order.sellerId), sid(order.buyerId), amount, sid(order._id));
-    }
-    const wallet = await getOrCreateWallet(sid(order.buyerId));
-    wallet.availableGnf += amount;
-    await wallet.save();
-    if (finalize) {
-      order.escrowStatus = "refunded";
-      order.status = "REFUNDED";
-      order.timeline.push({
-        status: "REFUNDED",
-        at: new Date(),
-        note: parsed
-          ? `Remboursement portefeuille (montant < ${MIN_TRANSFER_GNF} GNF)`
-          : "Remboursement crédité au portefeuille (numéro Mobile Money manquant)",
-      });
-      await notifyOrderParties(order, "REFUNDED", "Remboursement effectué");
-    }
-    await order.save();
-    return { mode: "wallet" as const };
+  if (!parsed) {
+    throw badRequest(
+      "PAYOUT_PHONE",
+      "Remboursement impossible : le numéro Mobile Money du paiement est manquant. Les fonds restent en séquestre."
+    );
+  }
+  if (amount < MIN_TRANSFER_GNF) {
+    throw badRequest(
+      "MIN_TRANSFER",
+      `Le remboursement Mobile Money minimum est de ${MIN_TRANSFER_GNF} GNF. Les fonds restent en séquestre.`
+    );
   }
 
   if (finalize) order.escrowStatus = "refund_pending";
@@ -476,31 +421,97 @@ export async function refundOrderToBuyer(
   return { mode: "cinetpay" as const, payment };
 }
 
-export async function withdrawToMobile(userId: string, amountGnf: number, phone: string) {
-  const amount = Math.round(amountGnf);
-  if (amount < MIN_TRANSFER_GNF) {
-    throw badRequest("MIN_TRANSFER", `Le retrait minimum CinetPay est de ${MIN_TRANSFER_GNF} GNF.`);
+export async function splitEscrow(order: any, buyerAmt: number, sellerAmt: number) {
+  if (order.escrowStatus !== "held") {
+    throw badRequest("ESCROW", "Séquestre déjà clôturé");
   }
-  let dest;
-  try {
-    dest = requireGnMobile(phone);
-  } catch (err) {
-    throw badRequest("PHONE", err instanceof Error ? err.message : "Numéro Mobile Money invalide");
+  const buyer = Math.round(buyerAmt);
+  const sellerAmtRounded = Math.round(sellerAmt);
+  if ((buyer > 0 && buyer < MIN_TRANSFER_GNF) || (sellerAmtRounded > 0 && sellerAmtRounded < MIN_TRANSFER_GNF)) {
+    throw badRequest(
+      "MIN_TRANSFER",
+      `Chaque part versée doit atteindre ${MIN_TRANSFER_GNF} GNF. Les fonds restent en séquestre.`
+    );
   }
-  const wallet = await getOrCreateWallet(userId);
-  if (wallet.availableGnf < amount) {
-    throw badRequest("INSUFFICIENT", "Solde disponible insuffisant");
+  if (buyer > 0) {
+    const inbound = order.paymentMerchantId
+      ? await Payment.findOne({ merchantTransactionId: order.paymentMerchantId, kind: "payment" })
+      : await Payment.findOne({ orderIds: order._id, kind: "payment" });
+    const phone = inbound?.phoneE164 || order.address?.paymentPhone || order.address?.phone;
+    const parsed = phone ? parseGnMobile(String(phone)) : null;
+    if (!parsed) {
+      throw badRequest("PAYOUT_PHONE", "Numéro Mobile Money de l'acheteur manquant.");
+    }
+    await startTransfer({
+      kind: "split",
+      amountGnf: buyer,
+      method: parsed.operator,
+      phoneE164: parsed.e164,
+      reason: "Litige — part acheteur",
+      orderIds: [sid(order._id)],
+      buyerId: sid(order.buyerId),
+    });
   }
-  wallet.availableGnf -= amount;
-  await wallet.save();
-  return startTransfer({
-    kind: "withdrawal",
-    amountGnf: amount,
-    method: dest.operator,
-    phoneE164: dest.e164,
-    reason: "Retrait FripCash",
-    userId,
+  if (sellerAmtRounded > 0) {
+    const seller = await User.findById(order.sellerId);
+    if (!seller) throw notFound("Vendeur introuvable");
+    const dest = sellerPayoutPhone(seller);
+    await startTransfer({
+      kind: "split",
+      amountGnf: sellerAmtRounded,
+      method: dest.operator,
+      phoneE164: dest.e164,
+      reason: "Litige — part vendeur",
+      orderIds: [sid(order._id)],
+      buyerId: sid(order.buyerId),
+    });
+  }
+  order.status = "FUNDS_RELEASED";
+  order.escrowStatus = "released";
+  order.timeline.push({
+    status: "FUNDS_RELEASED",
+    at: new Date(),
+    note: "Litige partagé — versements Mobile Money",
   });
+  await order.save();
+}
+
+export async function payCourierDeliveryFee(order: any, courier: { _id: unknown; phone?: string | null }) {
+  const fee = Math.round(Math.max(0, order.shippingCostGnf || 0));
+  if (fee <= 0) return null;
+  const existing = await Payment.findOne({
+    orderIds: order._id,
+    kind: "delivery",
+    status: { $in: ["pending", "success"] },
+  });
+  if (existing) return existing;
+  const parsed = courier.phone ? parseGnMobile(String(courier.phone)) : null;
+  if (!parsed || fee < MIN_TRANSFER_GNF) {
+    order.timeline.push({
+      status: order.status,
+      at: new Date(),
+      note: !parsed
+        ? "Frais de livraison non versés : numéro Mobile Money du livreur manquant"
+        : `Frais de livraison non versés : minimum CinetPay ${MIN_TRANSFER_GNF} GNF`,
+    });
+    return null;
+  }
+  return startTransfer({
+    kind: "delivery",
+    amountGnf: fee,
+    method: parsed.operator,
+    phoneE164: parsed.e164,
+    reason: "Frais de livraison FripCash",
+    orderIds: [sid(order._id)],
+    userId: sid(courier._id),
+  });
+}
+
+export async function withdrawToMobile(_userId: string, _amountGnf: number, _phone: string) {
+  throw badRequest(
+    "NO_WALLET",
+    "FripCash ne gère pas de portefeuille interne. Les fonds partent directement vers Mobile Money."
+  );
 }
 
 export function paymentPublicView(payment: any, extra?: { mustRedirect?: boolean }) {

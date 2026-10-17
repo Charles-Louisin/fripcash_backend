@@ -3,7 +3,7 @@ import { Listing } from "../models/listing.js";
 import { badRequest } from "./http-error.js";
 
 export function isSellerSignupRole(role?: string | null) {
-  return !!role && role !== "acheteur";
+  return !!role && role !== "acheteur" && role !== "livreur";
 }
 
 export async function resolveActiveZoneId(zoneId?: string | null) {
