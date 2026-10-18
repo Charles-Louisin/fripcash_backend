@@ -146,6 +146,13 @@ cartRouter.patch(
     if (!cart) throw notFound();
     const item = cart.items.id(param(req.params.id));
     if (!item) throw notFound();
+    const listing = await Listing.findById(item.listingId).select("quantity status").lean();
+    if (!listing || listing.status !== "ACTIVE" || listing.quantity <= 0) {
+      throw badRequest("SOLD_OUT", "Stock épuisé");
+    }
+    if (req.body.quantity > listing.quantity) {
+      throw badRequest("VALIDATION_ERROR", `Stock insuffisant : ${listing.quantity} disponible(s)`);
+    }
     item.quantity = req.body.quantity;
     await cart.save();
     res.json(await cartView(await loadCart(String(cart.userId))));

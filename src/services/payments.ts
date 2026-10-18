@@ -6,7 +6,7 @@ import { User } from "../models/user.js";
 import { badRequest, notFound } from "../utils/http-error.js";
 import { sid } from "../utils/ids.js";
 import { logger } from "../utils/logger.js";
-import { notifyOrderParties } from "./notify.js";
+import { notify, notifyOrderParties } from "./notify.js";
 import {
   cinetpayNotifyUrl,
   getCinetPayPayment,
@@ -60,6 +60,37 @@ export async function restoreReservedStock(
   }
 }
 
+const LOW_STOCK = 2;
+
+async function warnSellersAboutStock(lines: Array<{ listingId: unknown }>) {
+  for (const line of lines) {
+    const listing = await Listing.findById(line.listingId).select("title quantity status sellerId").lean();
+    if (!listing?.sellerId) continue;
+    const data = { listingId: sid(listing._id), stock: listing.quantity };
+    try {
+      if (listing.quantity <= 0) {
+        await notify(
+          sid(listing.sellerId),
+          "listing",
+          "Article épuisé",
+          `« ${listing.title} » n'a plus de stock. Il n'est plus commandable : augmente le stock pour le remettre en vente.`,
+          data
+        );
+      } else if (listing.quantity <= LOW_STOCK) {
+        await notify(
+          sid(listing.sellerId),
+          "listing",
+          "Stock faible",
+          `Il ne reste que ${listing.quantity} « ${listing.title} » en stock.`,
+          data
+        );
+      }
+    } catch (err) {
+      logger.warn({ err: String(err) }, "stock warning failed");
+    }
+  }
+}
+
 function applyCinetPayIds(payment: any, result: CinetPayApiResult) {
   if (result.transactionId) payment.cinetpayTransactionId = result.transactionId;
   if (result.notifyToken) payment.notifyToken = result.notifyToken;
@@ -100,6 +131,7 @@ export async function settleInboundPayment(payment: any, result: CinetPayApiResu
       await order.save();
       await notifyOrderParties(order, "SELLER_NOTIFIED");
     }
+    await warnSellersAboutStock(payment.reservedLines || []);
     if (payment.buyerId) {
       await Cart.findOneAndUpdate({ userId: payment.buyerId }, { items: [] });
     }
