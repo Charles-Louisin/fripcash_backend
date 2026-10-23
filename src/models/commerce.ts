@@ -47,6 +47,7 @@ const orderSchema = new Schema(
     },
     paymentMethod: { type: String, default: "orange_money" },
     pickupCode: { type: String, default: null },
+    pickupCodeAttempts: { type: Number, default: 0 },
     pickupZoneId: { type: Schema.Types.ObjectId, ref: "Zone", default: null },
     notifiedCourierIds: [{ type: Schema.Types.ObjectId, ref: "User" }],
     address: { type: Schema.Types.Mixed, default: {} },

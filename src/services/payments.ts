@@ -20,9 +20,36 @@ import {
   type CinetPayMethod,
 } from "./cinetpay.js";
 import { parseGnMobile, type GnOperator } from "./gn-phone.js";
+import { randomDigits } from "../utils/pricing.js";
 
 export const MIN_TRANSFER_GNF = 500;
 export const MIN_PAYMENT_GNF = MIN_TRANSFER_GNF;
+
+const PICKUP_ACTIVE_STATUSES = [
+  "PAID",
+  "SELLER_NOTIFIED",
+  "PREPARING",
+  "READY_FOR_PICKUP",
+  "COURIER_ASSIGNED",
+  "COLLECTED",
+  "IN_TRANSIT",
+  "DELIVERED",
+];
+
+/** Code de retrait à 6 chiffres, distinct des codes actifs des autres commandes du même acheteur. */
+async function generatePickupCode(order: any) {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const code = randomDigits(6);
+    const clash = await Order.exists({
+      _id: { $ne: order._id },
+      buyerId: order.buyerId,
+      pickupCode: code,
+      status: { $in: PICKUP_ACTIVE_STATUSES },
+    });
+    if (!clash) return code;
+  }
+  return randomDigits(6);
+}
 
 function newMerchantId() {
   return `fc${new mongoose.Types.ObjectId().toString()}`;
@@ -124,12 +151,25 @@ export async function settleInboundPayment(payment: any, result: CinetPayApiResu
         order.escrowStatus = "held";
       }
       order.status = "SELLER_NOTIFIED";
+      if (order.fulfillmentMode === "pickup" && !order.pickupCode) {
+        order.pickupCode = await generatePickupCode(order);
+        order.pickupCodeAttempts = 0;
+      }
       order.timeline.push(
         { status: "PAID", at: new Date(), note: "Paiement CinetPay confirmé — fonds en séquestre" },
         { status: "SELLER_NOTIFIED", at: new Date() }
       );
       await order.save();
       await notifyOrderParties(order, "SELLER_NOTIFIED");
+      if (order.pickupCode) {
+        await notify(
+          sid(order.buyerId),
+          "order",
+          "Code de retrait",
+          `Commande payée. Ton code de retrait : ${order.pickupCode}. Présente-le au vendeur pour récupérer ton colis.`,
+          { orderId: sid(order._id), status: "SELLER_NOTIFIED" }
+        );
+      }
     }
     await warnSellersAboutStock(payment.reservedLines || []);
     if (payment.buyerId) {
@@ -440,6 +480,8 @@ export async function refundOrderToBuyer(
   }
 
   if (finalize) order.escrowStatus = "refund_pending";
+  order.pickupCode = null;
+  order.pickupCodeAttempts = 0;
   await order.save();
   const payment = await startTransfer({
     kind: "refund",

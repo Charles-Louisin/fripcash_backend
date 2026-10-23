@@ -181,7 +181,6 @@ const checkoutSchema = z.object({
   name: z.string().min(2),
   email: z.string().email("Adresse e-mail invalide"),
   mobileNumber: z.string().optional(),
-  shippingCostGnf: z.number().optional(),
   toZoneId: z.string().optional(),
   zoneId: z.string().optional(),
   offerAmountGnf: z.number().optional(),
@@ -263,9 +262,6 @@ checkoutRouter.post(
     }
 
     async function resolveShipping(fulfillment: string, listing: any) {
-      if (Number.isFinite(Number(body.shippingCostGnf)) && body.toZoneId) {
-        return Math.max(0, Number(body.shippingCostGnf));
-      }
       if (fulfillment === "pickup") return 0;
       const to = body.toZoneId || body.zoneId;
       if (!to) return 0;
@@ -307,13 +303,23 @@ checkoutRouter.post(
 
     const createdOrders: any[] = [];
     const reservedLines: Array<{ listingId: unknown; quantity: number }> = [];
-    let shippingAssigned = false;
 
     try {
       for (const [sellerId, lines] of bySeller) {
         const seller = sellers.get(sellerId);
         const fulfillment =
           body.fulfillmentMode || fulfillmentForShopKind(seller?.seller?.shopKind);
+        if (fulfillment === "pickup" && seller?.seller?.shopKind !== "proximite") {
+          const handPickupOk = lines.every(
+            (l) => l.listing.destination === "SECONDE_MAIN" && l.listing.pickupEnabled === true
+          );
+          if (!handPickupOk) {
+            throw badRequest(
+              "PICKUP_NOT_ALLOWED",
+              "Le retrait en main propre n'est pas proposé par ce vendeur."
+            );
+          }
+        }
         const usedOffers: any[] = [];
         const items = lines.flatMap(({ listing, quantity }) => {
           const cover = [...(listing.media || [])].sort(
@@ -370,10 +376,7 @@ checkoutRouter.post(
         }
         const amountGnf = hasOffer ? offerAmountGnf! : Math.round(goodsGnf * factor);
         const commissionGnf = items.reduce((s, i) => s + i.commissionGnf, 0);
-        const shippingCostGnf = shippingAssigned
-          ? 0
-          : await resolveShipping(fulfillment, lines[0].listing);
-        shippingAssigned = true;
+        const shippingCostGnf = await resolveShipping(fulfillment, lines[0].listing);
         const pickupZoneId = lines[0].listing.zoneId || body.toZoneId || body.zoneId || null;
 
         const order = await Order.create({

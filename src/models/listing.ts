@@ -20,6 +20,7 @@ const listingSchema = new Schema(
     commissionAmountGnf: { type: Number, required: true },
     quantity: { type: Number, required: true, min: 0 },
     negotiable: { type: Boolean, default: false },
+    pickupEnabled: { type: Boolean, default: false },
     discountEnabled: { type: Boolean, default: false },
     compareAtPriceGnf: { type: Number, default: null },
     status: {

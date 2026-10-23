@@ -255,6 +255,95 @@ ordersRouter.post(
   })
 );
 
+const PICKUP_HANDOFF_STATUSES = ["PAID", "SELLER_NOTIFIED", "PREPARING", "READY_FOR_PICKUP"];
+const PICKUP_MAX_ATTEMPTS = 5;
+
+ordersRouter.post(
+  "/:id/pickup-code/verify",
+  validate(z.object({ code: z.string().regex(/^\d{6}$/, "Le code doit contenir 6 chiffres") })),
+  ah(async (req, res) => {
+    const row = await Order.findById(req.params.id);
+    if (!row) throw notFound();
+    const uid = (req as AuthedRequest).userId!;
+    if (sid(row.sellerId) !== uid && (req as AuthedRequest).audience !== "ADMIN") {
+      throw forbidden();
+    }
+    if (row.fulfillmentMode !== "pickup") {
+      throw badRequest("FULFILLMENT", "Cette commande n'est pas en retrait par code");
+    }
+    if (row.escrowStatus !== "held") {
+      throw badRequest("ESCROW", "Le paiement n'est pas (ou plus) bloqué en séquestre");
+    }
+    if (!PICKUP_HANDOFF_STATUSES.includes(row.status)) {
+      throw badRequest("ILLEGAL_TRANSITION", `Retrait impossible depuis ${row.status}`);
+    }
+    if (row.offerStatus === "pending") {
+      throw badRequest("OFFER_PENDING", "Accepte ou refuse l'offre avant de valider le retrait.");
+    }
+    if (row.pickupCodeAttempts >= PICKUP_MAX_ATTEMPTS) {
+      row.pickupCode = null;
+      row.pickupCodeAttempts = 0;
+      await row.save();
+      await notify(
+        sid(row.buyerId),
+        "order",
+        "Code de retrait désactivé",
+        "Trop de tentatives incorrectes : le code de retrait est désactivé. Contacte le support FripCash.",
+        { orderId: sid(row._id), status: row.status }
+      );
+      throw badRequest("PICKUP_CODE_LOCKED", "Trop de tentatives : le code est désactivé.");
+    }
+    if (!row.pickupCode) {
+      throw badRequest("PICKUP_CODE_INVALID", "Aucun code actif pour cette commande.");
+    }
+    if (req.body.code !== row.pickupCode) {
+      row.pickupCodeAttempts += 1;
+      await row.save();
+      if (row.pickupCodeAttempts >= PICKUP_MAX_ATTEMPTS) {
+        await notify(
+          sid(row.buyerId),
+          "order",
+          "Code de retrait désactivé",
+          "Trop de tentatives incorrectes : le code de retrait est désactivé. Contacte le support FripCash.",
+          { orderId: sid(row._id), status: row.status }
+        );
+      }
+      const left = PICKUP_MAX_ATTEMPTS - row.pickupCodeAttempts;
+      throw badRequest(
+        "PICKUP_CODE_MISMATCH",
+        left > 0
+          ? `Code incorrect. ${left} tentative${left > 1 ? "s" : ""} avant désactivation.`
+          : "Code incorrect : le code est maintenant désactivé."
+      );
+    }
+
+    row.pickupCode = null;
+    row.pickupCodeAttempts = 0;
+    if (!row.buyerConfirmedAt) {
+      row.buyerConfirmedAt = new Date();
+      row.timeline.push({
+        status: "BUYER_CONFIRMED",
+        at: new Date(),
+        note: "Retrait validé par le code vendeur",
+      });
+    }
+    row.status = "DELIVERED";
+    row.timeline.push({
+      status: "DELIVERED",
+      at: new Date(),
+      note: "Colis remis — retrait validé par code",
+    });
+    await row.save();
+    await notifyOrderParties(row, "DELIVERED", "Retrait validé par code — colis remis à l'acheteur");
+    if (row.escrowStatus === "held" || row.escrowStatus === "payout_pending") {
+      await payoutOrderToSeller(row, orderNet(row), "Libération séquestre FripCash");
+    }
+    const fresh = await Order.findById(row._id);
+    if (!fresh) throw notFound();
+    res.json(await hydrateOrder(fresh));
+  })
+);
+
 ordersRouter.post(
   "/:id/disputes",
   validate(z.object({ reason: z.string().min(3), role: z.enum(["buyer", "seller"]).optional() })),

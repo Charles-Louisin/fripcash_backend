@@ -235,6 +235,7 @@ listingsRouter.post(
       categoryId: z.string().optional(),
       conditionNote: z.string().optional(),
       negotiable: z.boolean().optional(),
+      pickupEnabled: z.boolean().optional(),
       discountEnabled: z.boolean().optional(),
       compareAtPriceGnf: z.number().nullable().optional(),
     })
@@ -277,6 +278,9 @@ listingsRouter.post(
       zoneId,
       conditionNote: req.body.conditionNote ?? null,
       negotiable: !!req.body.negotiable,
+      pickupEnabled:
+        (user.seller?.listingDestination || req.body.destination) === "SECONDE_MAIN" &&
+        !!req.body.pickupEnabled,
       discountEnabled: !!req.body.discountEnabled,
       compareAtPriceGnf: req.body.compareAtPriceGnf ?? null,
       status: "ACTIVE",
@@ -297,6 +301,9 @@ listingsRouter.patch(
     if (sid(row.sellerId) !== sid(user._id)) throw forbidden();
     const patch = { ...req.body };
     delete patch.zoneId;
+    if (patch.pickupEnabled !== undefined && row.destination !== "SECONDE_MAIN") {
+      delete patch.pickupEnabled;
+    }
     if (patch.netPriceGnf) {
       const rate = row.commissionRate || rateForShopKind(user.seller?.shopKind);
       patch.priceGnf = previewBuyerPrice(patch.netPriceGnf, rate);
