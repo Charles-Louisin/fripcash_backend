@@ -22,7 +22,6 @@ export function applySignupRole(
 
   if (role === "livreur") {
     user.authAudience = "COURIER";
-    user.canBuy = false;
     user.courier = {
       verificationStatus: "none",
       isAvailable: false,

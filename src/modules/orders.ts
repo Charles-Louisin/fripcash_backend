@@ -434,7 +434,7 @@ ordersRouter.post(
 
 ordersRouter.post(
   "/:id/seller-refund",
-  requireAudience("CONSUMER"),
+  requireAudience("CONSUMER", "COURIER"),
   ah(async (req, res) => {
     const row = await Order.findById(req.params.id);
     if (!row) throw notFound();

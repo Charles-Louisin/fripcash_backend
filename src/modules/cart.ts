@@ -31,7 +31,7 @@ import {
 } from "../services/payments.js";
 
 export const cartRouter = Router();
-cartRouter.use(requireAuth, requireAudience("CONSUMER"));
+cartRouter.use(requireAuth, requireAudience("CONSUMER", "COURIER"));
 
 async function loadCart(userId: string) {
   let cart = await Cart.findOne({ userId });
@@ -198,7 +198,7 @@ function bundleDiscountPercent(seller: any, items: { quantity: number }[]) {
 checkoutRouter.post(
   "/",
   requireAuth,
-  requireAudience("CONSUMER"),
+  requireAudience("CONSUMER", "COURIER"),
   validate(checkoutSchema),
   ah(async (req, res) => {
     const user = (req as AuthedRequest).userDoc!;

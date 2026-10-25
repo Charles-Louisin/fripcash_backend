@@ -37,7 +37,9 @@ export function toMe(user: InstanceType<typeof User>) {
     email: user.email,
     displayName: user.name || user.phone || user.email || "",
     preferredLocale: user.preferredLocale || "FR",
-    canBuy: user.canBuy && user.authAudience === "CONSUMER",
+    canBuy:
+      user.authAudience !== "ADMIN" &&
+      (user.authAudience === "COURIER" || user.canBuy),
     emailVerified: !!user.emailVerified,
     phoneNumberVerified: !!user.phoneNumberVerified,
     avatarUrl: (user as any).avatarUrl || "",

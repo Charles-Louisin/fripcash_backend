@@ -219,7 +219,7 @@ listingsRouter.get(
 listingsRouter.post(
   "/",
   requireAuth,
-  requireAudience("CONSUMER"),
+  requireAudience("CONSUMER", "COURIER"),
   validate(
     z.object({
       title: z.string().min(2),
@@ -293,7 +293,7 @@ listingsRouter.post(
 listingsRouter.patch(
   "/:id",
   requireAuth,
-  requireAudience("CONSUMER"),
+  requireAudience("CONSUMER", "COURIER"),
   ah(async (req, res) => {
     const user = (req as AuthedRequest).userDoc!;
     const row = await Listing.findById(req.params.id);
@@ -319,7 +319,7 @@ listingsRouter.patch(
 listingsRouter.delete(
   "/:id",
   requireAuth,
-  requireAudience("CONSUMER"),
+  requireAudience("CONSUMER", "COURIER"),
   ah(async (req, res) => {
     const user = (req as AuthedRequest).userDoc!;
     const row = await Listing.findById(req.params.id);

@@ -130,7 +130,7 @@ async function readSheetRows(buffer: Buffer, csv: boolean) {
 
 export const meRouter = Router();
 
-meRouter.use(requireAuth, requireAudience("CONSUMER", "ADMIN"));
+meRouter.use(requireAuth, requireAudience("CONSUMER", "ADMIN", "COURIER"));
 
 meRouter.get(
   "/",
@@ -182,7 +182,7 @@ meRouter.post(
   "/seller/particulier",
   ah(async (req, res) => {
     const user = (req as AuthedRequest).userDoc!;
-    if (user.authAudience !== "CONSUMER") throw forbidden();
+    if (user.authAudience === "ADMIN") throw forbidden();
     if (user.seller?.kind === "boutique") {
       throw badRequest(
         "ALREADY_SHOP",
@@ -246,17 +246,10 @@ meRouter.post(
     const user = (req as AuthedRequest).userDoc!;
     const shopKind = req.body.shopKind.toLowerCase() as "standard" | "proximite" | "enseigne";
     const needsReview = shopKind === "proximite" || shopKind === "enseigne";
-    const sameKind = user.seller?.kind === "boutique" && user.seller.shopKind === shopKind;
-    const emptyShop = !(user.seller?.kycDocuments?.length);
-    if (
-      user.seller?.kind === "boutique" &&
-      user.seller.verificationStatus !== "rejected" &&
-      !sameKind &&
-      !emptyShop
-    ) {
+    if (user.authAudience === "COURIER" && shopKind !== "standard") {
       throw badRequest(
-        "ALREADY_SHOP",
-        "Tu as déjà une boutique ou une enseigne sur ce compte."
+        "COURIER_SHOP_KIND",
+        "En tant que livreur, tu peux vendre uniquement des articles neufs ou en tant que particulier."
       );
     }
     if (req.body.orangeMoneyPhone) {
