@@ -111,7 +111,7 @@ const allocationSchema = new Schema(
     parentOrderId: { type: ObjectId, ref: "ParentOrder", required: true, index: true },
     sellerOrderId: { type: ObjectId, ref: "Order", default: null, index: true },
     deliveryId: { type: ObjectId, ref: "Delivery", default: null, index: true },
-    beneficiaryType: { type: String, enum: ["seller", "courier", "platform"], required: true },
+    beneficiaryType: { type: String, enum: ["seller", "courier", "platform", "provider"], required: true },
     /** ObjectId du vendeur/livreur ; "fripcash" pour la commission ; null tant que le livreur n'est pas affecté. */
     beneficiaryId: { type: Schema.Types.Mixed, default: null },
     /** Photographie financière figée à la commande : jamais modifiée. */

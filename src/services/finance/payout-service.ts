@@ -28,7 +28,7 @@ import { logger } from "../../utils/logger.js";
 import { publicApiOrigin } from "../../utils/public-api.js";
 import { ChapChapPayError, ccpChannelForOperator, paymentProvider } from "../chapchappay.js";
 import { parseGnMobile } from "../gn-phone.js";
-import { notify, notifyOrderParties } from "../notify.js";
+import { notify } from "../notify.js";
 import {
   alertFinance,
   auditFinance,
@@ -509,14 +509,12 @@ async function afterOutcome(payout: any, outcome: Outcome, flags: { duplicate?: 
     if (outcome.status === "succeeded") {
       const { refreshParentOrderStatus } = await import("./financial-service.js");
       await refreshParentOrderStatus(payout.parentOrderId);
+      // Seul le bénéficiaire est prévenu : l'acheteur n'a pas à voir les versements du vendeur.
       const label = payout.beneficiaryType === "buyer" ? "Remboursement effectué" : "Reversement effectué";
       await notify(sid(payout.beneficiaryId), "payment", label, `${payout.amount.toLocaleString("fr-FR")} GNF envoyés sur ton Mobile Money.`, {
         payoutId: sid(payout._id),
+        ...(payout.sellerOrderId ? { orderId: sid(payout.sellerOrderId) } : {}),
       });
-      if (payout.beneficiaryType === "seller" && payout.sellerOrderId) {
-        const order = await Order.findById(payout.sellerOrderId);
-        if (order) await notifyOrderParties(order, "FUNDS_RELEASED", "Les fonds ont été versés au vendeur");
-      }
     }
     if (outcome.status === "failed") {
       await alertFinance("Reversement échoué", `${payout.payoutReference} (${payout.amount} GNF) : ${outcome.message || outcome.code}`, {

@@ -95,6 +95,30 @@ export async function assignCourier(sellerOrderId: unknown, courierId: unknown) 
   });
 }
 
+/** Livreur rappelé par le vendeur avant la collecte : la livraison et sa rémunération sont libérées. */
+export async function unassignCourier(sellerOrderId: unknown) {
+  const order = await Order.findById(sellerOrderId, "deliveryId").lean();
+  if (!order?.deliveryId) return null;
+  return withTransaction(async (session) => {
+    const delivery = await Delivery.findOneAndUpdate(
+      { _id: order.deliveryId, status: { $in: ["assigned", "accepted"] } },
+      {
+        $set: { courierId: null, status: "awaiting_courier" },
+        $push: { history: { status: "awaiting_courier", at: new Date(), note: "Livreur rappelé par le vendeur" } },
+      },
+      { new: true, ...opts(session) }
+    );
+    if (delivery) {
+      await FinancialAllocation.updateOne(
+        { deliveryId: delivery._id, beneficiaryType: "courier", status: { $in: ["awaiting_payment", "funded"] } },
+        { $set: { beneficiaryId: null } },
+        opts(session)
+      );
+    }
+    return delivery;
+  });
+}
+
 export async function updateDeliveryProgress(sellerOrderId: unknown, status: "picked_up" | "in_transit" | "delivered") {
   const order = await Order.findById(sellerOrderId, "deliveryId").lean();
   if (!order?.deliveryId) return;

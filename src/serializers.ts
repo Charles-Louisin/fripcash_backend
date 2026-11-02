@@ -307,3 +307,41 @@ export function toAdminUser(user: InstanceType<typeof User>) {
       : null,
   };
 }
+
+/** Retire de la vue d'une commande les étapes réservées à d'autres rôles (notes internes). */
+export function scopeOrderView<T extends { timeline?: any[] }>(view: T, role: "buyer" | "seller" | "courier" | "admin"): T {
+  if (role === "admin" || !Array.isArray(view.timeline)) return view;
+  return {
+    ...view,
+    timeline: view.timeline
+      .map((t) => (t && typeof t.toObject === "function" ? t.toObject() : t))
+      .filter((t) => !t?.visibleTo?.length || t.visibleTo.includes(role))
+      .map(({ visibleTo: _v, ...t }) => t),
+  };
+}
+
+function roleOf(view: any, uid: string, audience?: string) {
+  if (audience === "ADMIN") return "admin" as const;
+  if (view.buyerId === uid) return "buyer" as const;
+  if (view.sellerId === uid) return "seller" as const;
+  if (view.courierId === uid || audience === "COURIER") return "courier" as const;
+  return "buyer" as const;
+}
+
+function scopeDeep(body: any, uid: string, audience?: string): any {
+  if (Array.isArray(body)) return body.map((x) => scopeDeep(x, uid, audience));
+  if (!body || typeof body !== "object") return body;
+  if (Array.isArray(body.timeline) && ("buyerId" in body || "sellerId" in body)) {
+    return scopeOrderView(body, roleOf(body, uid, audience));
+  }
+  if (Array.isArray(body.orders)) return { ...body, orders: scopeDeep(body.orders, uid, audience) };
+  if (body.order && typeof body.order === "object") return { ...body, order: scopeDeep(body.order, uid, audience) };
+  return body;
+}
+
+/** Middleware : toute commande renvoyée est filtrée selon le rôle de celui qui la consulte. */
+export function scopeOrderResponses(req: any, res: any, next: () => void) {
+  const json = res.json.bind(res);
+  res.json = (body: unknown) => json(scopeDeep(body, String(req.userId || ""), req.audience));
+  next();
+}

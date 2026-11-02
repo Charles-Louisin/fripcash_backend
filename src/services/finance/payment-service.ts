@@ -18,6 +18,7 @@ import { notify } from "../notify.js";
 import { afterOrdersPaid, applyPaidToOrders, releaseUnpaidOrders } from "../payments.js";
 import { alertFinance, enqueue, opts, recordLedger, withTransaction } from "./core.js";
 import { createFinancialStructure, fundAllocations } from "./financial-service.js";
+import { paymentFeeGnf } from "./fees.js";
 import { createRefundPayout } from "./payout-service.js";
 
 const VERIFY_THROTTLE_MS = 5_000;
@@ -46,8 +47,11 @@ export function safeAppReturnUrl(raw: unknown) {
   if (/^(fripcash|exp|exps):\/\//i.test(value)) return value;
   try {
     const url = new URL(value);
-    const allowed = env.corsOrigin.split(",").map((s) => s.trim().replace(/\/$/, "")).filter(Boolean);
-    return url.protocol === "https:" && allowed.includes(url.origin) ? value : "";
+    const allowed = [...env.corsOrigin.split(","), env.appWebUrl].map((s) => s.trim().replace(/\/$/, "")).filter(Boolean);
+    if (url.protocol === "https:" && allowed.includes(url.origin)) return value;
+    // App web en développement (expo start --web).
+    const local = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+    return env.nodeEnv !== "production" && local && url.protocol === "http:" ? value : "";
   } catch {
     return "";
   }
@@ -73,9 +77,11 @@ export async function startChapChapCheckout(input: CheckoutInput) {
   if (amount < env.chapchapMinPaymentGnf) {
     throw badRequest("MIN_PAYMENT", `Le montant minimum de paiement est de ${env.chapchapMinPaymentGnf} GNF.`);
   }
+  const paymentFee = paymentFeeGnf(amount, input.method);
   const { payment, orderNumber } = await withTransaction((session) =>
     createFinancialStructure(
       {
+        paymentFee,
         orders: input.orders,
         buyerId: input.buyerId,
         paymentMethod: input.method,

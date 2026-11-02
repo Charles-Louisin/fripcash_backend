@@ -85,8 +85,9 @@ const orderSchema = new Schema(
       default: null,
       _id: false,
     },
+    /** visibleTo vide = visible par toutes les parties ; sinon réservé à ces rôles (admin voit tout). */
     timeline: {
-      type: [{ status: String, at: Date, note: String }],
+      type: [{ status: String, at: Date, note: String, visibleTo: { type: [String], default: undefined } }],
       default: [],
     },
   },
@@ -155,6 +156,8 @@ const paymentSchema = new Schema(
     /** Succès reçu après libération du stock : remboursement à traiter par un admin. */
     requiresReview: { type: Boolean, default: false },
     amountGnf: { type: Number, required: true },
+    /** Frais Chap Chap Pay inclus dans amountGnf (payés par le client). */
+    paymentFeeGnf: { type: Number, default: 0 },
     currency: { type: String, default: "GNF" },
     phoneE164: { type: String, default: "" },
     buyerId: { type: Schema.Types.ObjectId, ref: "User", default: null, index: true },

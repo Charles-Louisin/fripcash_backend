@@ -53,6 +53,7 @@ export function serializePayment(doc: any) {
     kind: doc.kind,
     paymentMethod: doc.paymentMethod,
     amountGnf: doc.amountGnf,
+    paymentFeeGnf: doc.paymentFeeGnf || 0,
     message: doc.message || "",
     paymentUrl: doc.paymentUrl || "",
     orderIds: (doc.orderIds || []).map((id: unknown) => sid(id)),

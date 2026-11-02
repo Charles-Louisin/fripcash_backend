@@ -63,6 +63,8 @@ export type FinancialBreakdown = {
   sellers: SellerBreakdown[];
   courierTotal: number;
   platformCommission: number;
+  /** Frais Chap Chap Pay payés par le client, retenus par le prestataire : jamais redistribués. */
+  paymentFee: number;
   sellersTotal: number;
   totalAllocated: number;
   productsSubtotal: number;
@@ -70,7 +72,7 @@ export type FinancialBreakdown = {
 };
 
 /** Calcul 100 % serveur, à partir des lignes de commande figées (prix, net vendeur, commission). */
-export function calculateFinancialBreakdown(orders: SellerOrderLike[]): FinancialBreakdown {
+export function calculateFinancialBreakdown(orders: SellerOrderLike[], paymentFee = 0): FinancialBreakdown {
   const sellers = orders.map((order) => {
     const productsSubtotal = money(
       order.items.reduce((s, i) => s + (i.priceGnf || 0) * (i.quantity || 1), 0)
@@ -99,7 +101,8 @@ export function calculateFinancialBreakdown(orders: SellerOrderLike[]): Financia
       sellerPayable: sellerNet + (courierDelivery ? 0 : deliveryAmount),
     };
   });
-  const totalPaid = sellers.reduce((s, x) => s + x.grossAmount + x.deliveryAmount, 0);
+  const fee = money(paymentFee);
+  const totalPaid = sellers.reduce((s, x) => s + x.grossAmount + x.deliveryAmount, 0) + fee;
   const courierTotal = sellers.reduce((s, x) => s + (x.courierDelivery ? x.deliveryAmount : 0), 0);
   const platformCommission = sellers.reduce((s, x) => s + x.commission, 0);
   const sellersTotal = sellers.reduce((s, x) => s + x.sellerPayable, 0);
@@ -109,8 +112,9 @@ export function calculateFinancialBreakdown(orders: SellerOrderLike[]): Financia
     sellers,
     courierTotal,
     platformCommission,
+    paymentFee: fee,
     sellersTotal,
-    totalAllocated: sellersTotal + courierTotal + platformCommission,
+    totalAllocated: sellersTotal + courierTotal + platformCommission + fee,
     productsSubtotal: sellers.reduce((s, x) => s + x.productsSubtotal, 0),
     discounts: sellers.reduce((s, x) => s + x.discount, 0),
   };
@@ -121,6 +125,7 @@ export function allocationKeys(orderNumber: string) {
     seller: (sellerOrderId: unknown) => `${orderNumber}:seller:${sid(sellerOrderId)}`,
     courier: (deliveryId: unknown) => `${orderNumber}:courier:${sid(deliveryId)}`,
     platform: () => `${orderNumber}:platform`,
+    provider: () => `${orderNumber}:provider-fee`,
   };
 }
 
@@ -136,10 +141,11 @@ export async function createFinancialStructure(
     payerPhoneE164: string;
     reservedLines: Array<{ listingId: unknown; quantity: number }>;
     appReturnUrl: string;
+    paymentFee?: number;
   },
   session: Session
 ) {
-  const breakdown = calculateFinancialBreakdown(input.orders);
+  const breakdown = calculateFinancialBreakdown(input.orders, input.paymentFee || 0);
   if (breakdown.totalAllocated !== breakdown.totalPaid) {
     throw conflict("FINANCIAL_BALANCE", "Répartition financière déséquilibrée.");
   }
@@ -220,6 +226,15 @@ export async function createFinancialStructure(
     beneficiaryId: PLATFORM_BENEFICIARY,
     amount: breakdown.platformCommission,
   });
+  if (breakdown.paymentFee > 0) {
+    allocations.push({
+      allocationKey: keys.provider(),
+      parentOrderId: parentId,
+      beneficiaryType: "provider",
+      beneficiaryId: "chapchappay",
+      amount: breakdown.paymentFee,
+    });
+  }
 
   const created = await FinancialAllocation.insertMany(
     allocations.map((a) => ({
@@ -243,7 +258,7 @@ export async function createFinancialStructure(
           productsSubtotal: breakdown.productsSubtotal,
           discounts: breakdown.discounts,
           deliveryTotal: breakdown.sellers.reduce((s, x) => s + x.deliveryAmount, 0),
-          serviceFees: 0,
+          serviceFees: breakdown.paymentFee,
           totalPaid: breakdown.totalPaid,
         },
         payment: { paymentId, provider: "chapchappay", status: "pending" },
@@ -251,7 +266,7 @@ export async function createFinancialStructure(
           sellersTotal: breakdown.sellersTotal,
           courierTotal: breakdown.courierTotal,
           platformCommission: breakdown.platformCommission,
-          providerFees: 0,
+          providerFees: breakdown.paymentFee,
           totalAllocated: breakdown.totalAllocated,
         },
         status: "pending_payment",
@@ -271,6 +286,7 @@ export async function createFinancialStructure(
         provider: "chapchappay",
         paymentMethod: input.paymentMethod,
         amountGnf: breakdown.totalPaid,
+        paymentFeeGnf: breakdown.paymentFee,
         currency: "GNF",
         phoneE164: input.payerPhoneE164,
         buyerId: input.buyerId,
@@ -331,8 +347,9 @@ export async function validateFinancialBalance(parentOrderId: unknown, session: 
 export async function fundAllocations(parentOrderId: unknown, session: Session) {
   const rows = await FinancialAllocation.find({ parentOrderId, status: "awaiting_payment" }, null, opts(session));
   for (const a of rows) {
-    a.status = "funded";
-    a.history.push({ status: "funded", at: new Date(), note: "Paiement client confirmé" });
+    // Frais du prestataire : retenus à l'encaissement, ils ne sont dus à personne.
+    a.status = a.beneficiaryType === "provider" ? "retained" : "funded";
+    a.history.push({ status: a.status, at: new Date(), note: "Paiement client confirmé" });
     await a.save(opts(session));
   }
 }
@@ -352,7 +369,9 @@ async function openDisputeFor(sellerOrderId: unknown, session: Session) {
 export async function markAllocationEligible(allocationId: unknown, note: string, session: Session) {
   const allocation = await FinancialAllocation.findById(allocationId, null, opts(session));
   if (!allocation) throw notFound("Allocation introuvable");
-  if (allocation.beneficiaryType === "platform") return { allocation, payout: null };
+  if (allocation.beneficiaryType === "platform" || allocation.beneficiaryType === "provider") {
+    return { allocation, payout: null };
+  }
   if (allocation.status !== "funded") {
     // Déjà éligible, en cours, payée ou remboursée : rien à refaire.
     const payout = allocation.payoutId ? await Payout.findById(allocation.payoutId, null, opts(session)) : null;

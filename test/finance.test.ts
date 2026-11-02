@@ -20,6 +20,8 @@ process.env.FINANCE_REQUIRE_TRANSACTIONS = "true";
 process.env.PAYOUT_AUTO_EXECUTE = "true";
 process.env.PUBLIC_API_URL = "https://api.fripcash.test";
 process.env.OTP_DEV_ECHO = "false";
+// Scénarios de la spécification sans frais de paiement (montants exacts) ; un test dédié les active.
+process.env.CHAPCHAPPAY_PASS_FEES_TO_BUYER = "false";
 
 const { MongoMemoryReplSet } = await import("mongodb-memory-server");
 const mongoose = (await import("mongoose")).default;
@@ -35,6 +37,8 @@ const payouts = await import("../src/services/finance/payout-service.js");
 const { drainOutbox } = await import("../src/services/finance/worker.js");
 const { detectDuplicateOperations } = await import("../src/services/finance/reconciliation-service.js");
 const { createApp } = await import("../src/app.js");
+const { env } = await import("../src/config/env.js");
+const { paymentFeeGnf } = await import("../src/services/finance/fees.js");
 
 type PushBehavior = "success" | "error" | "pending" | "timeout" | "timeout_executed";
 
@@ -198,6 +202,50 @@ describe("Décomposition financière", () => {
     assert.equal(b.courierTotal, 5_000);
     assert.equal(b.platformCommission, 15_000);
     assert.equal(b.totalAllocated, b.totalPaid);
+  });
+});
+
+describe("Frais Chap Chap Pay répercutés sur le client", () => {
+  test("couvrent exactement la commission réelle (2 % + 200 en Mobile Money, 2,5 % + 200 sinon)", () => {
+    env.chapchapPassFeesToBuyer = true;
+    try {
+      for (const [method, rate] of [["OM_GN", 0.02], ["MTN_GN", 0.02], ["CHAPCHAPPAY", 0.025]] as const) {
+        for (const amount of [5_000, 115_000, 1_234_567]) {
+          const fee = paymentFeeGnf(amount, method);
+          const commission = Math.round(rate * (amount + fee) + 200);
+          assert.ok(amount + fee - commission >= amount, `${method} ${amount} : il reste ${amount + fee - commission}`);
+          assert.ok(amount + fee - commission - amount <= 2, "pas de sur-facturation");
+        }
+      }
+    } finally {
+      env.chapchapPassFeesToBuyer = false;
+    }
+  });
+
+  test("ajoutés au paiement unique, dans une allocation séparée qui ne touche ni vendeurs ni commission", async () => {
+    env.chapchapPassFeesToBuyer = true;
+    try {
+      const buyer = await user("buyer", "Client");
+      const seller = await user("seller", "Vendeur");
+      const order = await sellerOrder(buyer, seller, 50_000, 45_000);
+      const payment = (await startChapChapCheckout({ orders: [order], buyerId: buyer._id, method: "OM_GN", payPhone: { e164: buyer.phone!, local: buyer.phone!.slice(4) }, name: "Client", email: buyer.email!, reservedLines: [] }))!;
+      const fee = paymentFeeGnf(50_000, "OM_GN");
+      assert.equal(payment.amountGnf, 50_000 + fee);
+      assert.equal(payment.paymentFeeGnf, fee);
+      const op = await fake.findEcommerceOperationByOrderId(payment.merchantTransactionId);
+      assert.equal(op.amount, 50_000 + fee, "le client paie les frais sur la page Chap Chap Pay");
+      fake.setPaymentStatus(payment.merchantTransactionId, "success");
+      await verifyChapChapPayment(payment._id, { force: true });
+      const allocs = await F.FinancialAllocation.find({ parentOrderId: payment.parentOrderId });
+      const by = (t: string) => allocs.find((a) => a.beneficiaryType === t);
+      assert.equal(by("seller")!.amount, 45_000);
+      assert.equal(by("platform")!.amount, 5_000);
+      assert.equal(by("provider")!.amount, fee);
+      assert.equal(by("provider")!.status, "retained");
+      assert.equal(allocs.reduce((s, a) => s + a.amount, 0), payment.amountGnf);
+    } finally {
+      env.chapchapPassFeesToBuyer = false;
+    }
   });
 });
 

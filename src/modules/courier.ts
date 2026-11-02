@@ -8,16 +8,17 @@ import { ah } from "../utils/async-handler.js";
 import { badRequest, forbidden, notFound } from "../utils/http-error.js";
 import { sid } from "../utils/ids.js";
 import { hydrateCourierOrder } from "../services/orders-hydrate.js";
-import { notifyOrderParties } from "../services/notify.js";
-import { announceCourierInChat } from "../services/courier-announce.js";
+import { notifyCouriersMissionTaken, notifyOrderParties } from "../services/notify.js";
+import { announceCourierToBuyer, announceCourierToSeller } from "../services/courier-announce.js";
 import { courierCoversZone } from "../utils/courier-zones.js";
 import { assignCourier, isFinancialOrder, updateDeliveryProgress } from "../services/finance/delivery-service.js";
 import mongoose from "mongoose";
+import { scopeOrderResponses } from "../serializers.js";
 
 const DELIVERY_PROGRESS = { COLLECTED: "picked_up", IN_TRANSIT: "in_transit", DELIVERED: "delivered" } as const;
 
 export const courierRouter = Router();
-courierRouter.use(requireAuth, requireAudience("COURIER"));
+courierRouter.use(requireAuth, requireAudience("COURIER"), scopeOrderResponses);
 
 const PROGRESS: Record<string, string> = {
   COURIER_ASSIGNED: "COLLECTED",
@@ -284,9 +285,10 @@ courierRouter.get(
       res.json([]);
       return;
     }
+    // Une course n'apparaît qu'après « Notifier le livreur » par le vendeur, et disparaît dès qu'elle est prise.
     const rows = await Order.find({
       fulfillmentMode: "courier",
-      status: { $in: ["PREPARING", "READY_FOR_PICKUP"] },
+      status: "READY_FOR_PICKUP",
       courierId: null,
     }).sort({ createdAt: -1 });
     const visible = rows.filter((row) =>
@@ -313,23 +315,25 @@ courierRouter.post(
   ah(async (req, res) => {
     const user = (req as AuthedRequest).userDoc!;
     requireApproved(user);
-    const row = await Order.findById(req.params.orderId);
-    if (!row) throw notFound();
-    if (!["PREPARING", "READY_FOR_PICKUP"].includes(String(row.status))) {
-      throw badRequest("NOT_OPEN", "Cette mission n'est plus disponible");
-    }
-    if (!courierCoversZone(user.courier, row.pickupZoneId ? String(row.pickupZoneId) : null)) {
+    const candidate = await Order.findById(req.params.orderId);
+    if (!candidate) throw notFound();
+    if (!courierCoversZone(user.courier, candidate.pickupZoneId ? String(candidate.pickupZoneId) : null)) {
       throw forbidden("ZONE", "Cette mission n'est pas dans tes zones");
     }
-    if (row.courierId) throw forbidden("TAKEN", "Mission déjà prise");
-    row.courierId = user._id as any;
-    row.courierName = user.name;
-    row.status = "COURIER_ASSIGNED";
-    row.timeline.push({ status: "COURIER_ASSIGNED", at: new Date() });
-    await row.save();
+    // Attribution atomique : si deux livreurs acceptent en même temps, un seul obtient la course.
+    const row = await Order.findOneAndUpdate(
+      { _id: candidate._id, status: "READY_FOR_PICKUP", courierId: null },
+      {
+        $set: { courierId: user._id, courierName: user.name, status: "COURIER_ASSIGNED" },
+        $push: { timeline: { status: "COURIER_ASSIGNED", at: new Date() } },
+      },
+      { new: true }
+    );
+    if (!row) throw badRequest("TAKEN", "Cette livraison a déjà été acceptée par un autre livreur.");
     if (isFinancialOrder(row)) await assignCourier(row._id, user._id);
-    await announceCourierInChat(row, user);
-    await notifyOrderParties(row, "COURIER_ASSIGNED", `${user.name} a accepté la course`);
+    await announceCourierToSeller(row, user);
+    await notifyOrderParties(row, "COURIER_ASSIGNED", { courierName: user.name, exceptUserId: sid(user._id) });
+    await notifyCouriersMissionTaken(row, sid(user._id));
     res.json(await hydrateCourierOrder(row, sid(user._id)));
   })
 );
@@ -362,7 +366,9 @@ courierRouter.post(
     if (isFinancialOrder(row)) {
       await updateDeliveryProgress(row._id, DELIVERY_PROGRESS[req.body.status as keyof typeof DELIVERY_PROGRESS]);
     }
-    await notifyOrderParties(row, req.body.status);
+    // À la collecte, le client découvre son livreur dans SA discussion livreur (jamais chez le vendeur).
+    if (req.body.status === "COLLECTED") await announceCourierToBuyer(row, (req as AuthedRequest).userDoc!);
+    await notifyOrderParties(row, req.body.status, { exceptUserId: uid });
     res.json(await hydrateCourierOrder(row, uid));
   })
 );
@@ -385,7 +391,7 @@ courierRouter.post(
     });
     await row.save();
     if (isFinancialOrder(row)) await assignCourier(row._id, next._id);
-    await announceCourierInChat(row, next);
+    await announceCourierToSeller(row, next);
     res.json(await hydrateCourierOrder(row, (req as AuthedRequest).userId!));
   })
 );

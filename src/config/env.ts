@@ -46,6 +46,13 @@ export const env = {
     | "add"
     | "deduct",
   chapchapMinPaymentGnf: Number(process.env.CHAPCHAPPAY_MIN_PAYMENT_GNF || 5000),
+  /** Frais Chap Chap Pay ajoutés au total payé par le client (voir services/finance/fees.ts). */
+  chapchapPassFeesToBuyer: bool("CHAPCHAPPAY_PASS_FEES_TO_BUYER", true),
+  chapchapFeeRateMobile: Number(process.env.CHAPCHAPPAY_FEE_RATE_MOBILE ?? 0.02),
+  chapchapFeeRateOther: Number(process.env.CHAPCHAPPAY_FEE_RATE_OTHER ?? 0.025),
+  chapchapFeeFixedGnf: Number(process.env.CHAPCHAPPAY_FEE_FIXED_GNF ?? 200),
+  /** Page web de FripCash, utilisée si le paiement n'a pas été lancé depuis l'app. */
+  appWebUrl: (process.env.APP_WEB_URL || "https://fripcash.com").replace(/\/$/, ""),
   chapchapMinPayoutGnf: Number(process.env.CHAPCHAPPAY_MIN_PAYOUT_GNF || 1000),
   chapchapTimeoutMs: Number(process.env.CHAPCHAPPAY_TIMEOUT_MS || 20_000),
 

@@ -19,7 +19,9 @@ import { hydrateCourierOrder, hydrateOrder } from "../services/orders-hydrate.js
 import { buildSalesChart } from "../services/stats.js";
 import { legacyOrderError } from "../services/payments.js";
 import { User } from "../models/user.js";
+import { scopeOrderResponses } from "../serializers.js";
 import {
+  unassignCourier,
   confirmDelivery,
   confirmSellerOrderReceipt,
   holdForDispute,
@@ -30,7 +32,7 @@ import { sellerOrderFinancialView } from "../services/finance/views.js";
 import type { Request, Response } from "express";
 
 export const ordersRouter = Router();
-ordersRouter.use(requireAuth);
+ordersRouter.use(requireAuth, scopeOrderResponses);
 
 /** Commande du système financier : réception = éligibilité du vendeur (le worker paie ensuite). */
 async function financialReceipt(row: any, req: AuthedRequest, role: "buyer" | "admin" | "seller_code") {
@@ -39,7 +41,12 @@ async function financialReceipt(row: any, req: AuthedRequest, role: "buyer" | "a
 
 /** Commande antérieure à Chap Chap Pay : la réception est notée, le règlement est fait à la main. */
 async function flagLegacySettlement(row: any) {
-  row.timeline.push({ status: row.status, at: new Date(), note: "Règlement vendeur à effectuer manuellement (ancienne commande)" });
+  row.timeline.push({
+    status: row.status,
+    at: new Date(),
+    note: "Règlement vendeur à effectuer manuellement (ancienne commande)",
+    visibleTo: ["seller"],
+  });
   await row.save();
   await notifyAdmins(
     "order",
@@ -159,15 +166,8 @@ ordersRouter.patch(
       }
     }
 
-    let note = req.body.note as string | undefined;
-    if (next === "PREPARING" && row.fulfillmentMode === "courier") {
-      const notified = await notifyCouriersForOrder(row);
-      row.notifiedCourierIds = notified.ids as any;
-      note =
-        notified.names.length > 0
-          ? `Livreur(s) notifié(s) : ${notified.names.join(", ")}`
-          : "Aucun livreur disponible dans cette zone";
-    }
+    // La mise en préparation ne prévient AUCUN livreur : c'est le bouton « Notifier le livreur ».
+    const note = req.body.note as string | undefined;
 
     if (isFinancialOrder(row) && next === "FUNDS_RELEASED") {
       // Le statut FUNDS_RELEASED est posé par le worker quand le transfert est vérifié réussi.
@@ -185,7 +185,7 @@ ordersRouter.patch(
       row.status = next;
       row.timeline.push({ status: next, at: new Date(), note });
       await row.save();
-      await notifyOrderParties(row, next, note);
+      await notifyOrderParties(row, next, { exceptUserId: uid });
     }
     const fresh = await Order.findById(row._id);
     if (!fresh) throw notFound();
@@ -234,9 +234,9 @@ export const confirmReceptionHandler = ah(async (req: Request, res: Response) =>
     }
     if (firstConfirmation) {
       await notifyOrderParties(
-        { _id: row._id, buyerId: row.buyerId, sellerId: row.sellerId },
-        "DELIVERED",
-        "L'acheteur a confirmé la réception."
+        { _id: row._id, buyerId: row.buyerId, sellerId: row.sellerId, fulfillmentMode: row.fulfillmentMode },
+        "BUYER_CONFIRMED",
+        { exceptUserId: uid }
       );
       if (courier) {
         await notify(
@@ -286,22 +286,66 @@ ordersRouter.post(
     if (row.fulfillmentMode !== "courier") {
       throw badRequest("FULFILLMENT", "Cette commande n'est pas en livraison FripCash");
     }
-    const from = new Set(["PAID", "SELLER_NOTIFIED", "PREPARING"]);
-    if (!from.has(row.status)) {
-      throw badRequest("ILLEGAL_TRANSITION", `Mise à disposition impossible depuis ${row.status}`);
+    const from = new Set(["PAID", "SELLER_NOTIFIED", "PREPARING", "READY_FOR_PICKUP"]);
+    if (!from.has(row.status) || row.courierId) {
+      throw badRequest("ILLEGAL_TRANSITION", "Un livreur a déjà accepté cette course.");
     }
-    if (!row.notifiedCourierIds?.length) {
-      const notified = await notifyCouriersForOrder(row);
-      row.notifiedCourierIds = notified.ids as any;
+    if (row.offerStatus === "pending") {
+      throw badRequest("OFFER_PENDING", "Accepte ou refuse l'offre avant de notifier un livreur.");
     }
+    // « Notifier le livreur » : seuls les livreurs dont la zone couvre la collecte sont prévenus.
+    const notified = await notifyCouriersForOrder(row);
+    row.notifiedCourierIds = notified.ids as any;
+    const firstCall = row.status !== "READY_FOR_PICKUP";
     row.status = "READY_FOR_PICKUP";
     row.timeline.push({
       status: "READY_FOR_PICKUP",
       at: new Date(),
-      note: "Colis prêt — mission ouverte aux livreurs",
+      note: notified.names.length
+        ? `${notified.names.length} livreur(s) de la zone notifié(s)`
+        : "Aucun livreur disponible dans cette zone pour le moment",
+      visibleTo: ["seller"],
     });
     await row.save();
-    await notifyOrderParties(row, "READY_FOR_PICKUP", "Un livreur FripCash va récupérer la commande");
+    if (firstCall) await notifyOrderParties(row, "READY_FOR_PICKUP", { exceptUserId: sid(row.sellerId) });
+    res.json(await hydrateOrder(row));
+  })
+);
+
+/**
+ * « Rappeler un livreur » : le vendeur annule l'acceptation du livreur actuel (tant que le colis
+ * n'est pas collecté) et la course est reproposée à tous les livreurs de la zone.
+ */
+ordersRouter.post(
+  "/:id/recall-courier",
+  ah(async (req, res) => {
+    const uid = (req as AuthedRequest).userId!;
+    const current = await Order.findById(req.params.id);
+    if (!current) throw notFound();
+    if (sid(current.sellerId) !== uid && (req as AuthedRequest).audience !== "ADMIN") throw forbidden();
+    const previous = current.courierId ? sid(current.courierId) : null;
+    const row = await Order.findOneAndUpdate(
+      { _id: current._id, status: "COURIER_ASSIGNED", courierId: { $ne: null } },
+      { $set: { courierId: null, courierName: null, status: "READY_FOR_PICKUP" } },
+      { new: true }
+    );
+    if (!row || !previous) {
+      throw badRequest("NOT_RECALLABLE", "Le livreur a déjà récupéré le colis : il ne peut plus être remplacé.");
+    }
+    if (isFinancialOrder(row)) await unassignCourier(row._id);
+    const notified = await notifyCouriersForOrder(row);
+    row.notifiedCourierIds = notified.ids as any;
+    row.timeline.push({
+      status: "READY_FOR_PICKUP",
+      at: new Date(),
+      note: `Livreur rappelé — course reproposée à ${notified.names.length} livreur(s) de la zone`,
+      visibleTo: ["seller"],
+    });
+    await row.save();
+    await notify(previous, "mission", "Course annulée par le vendeur", `${row.items?.[0]?.title || "La commande"} : le vendeur a fait appel à un autre livreur.`, {
+      orderId: sid(row._id),
+      status: "READY_FOR_PICKUP",
+    });
     res.json(await hydrateOrder(row));
   })
 );
@@ -385,7 +429,7 @@ ordersRouter.post(
       note: "Colis remis — retrait validé par code",
     });
     await row.save();
-    await notifyOrderParties(row, "DELIVERED", "Retrait validé par code — colis remis à l'acheteur");
+    await notifyOrderParties(row, "PICKUP_HANDED", { exceptUserId: uid });
     if (isFinancialOrder(row)) {
       // Le code à 6 chiffres détenu par l'acheteur prouve la remise : équivalent d'un OTP.
       await financialReceipt(row, req as AuthedRequest, "seller_code");

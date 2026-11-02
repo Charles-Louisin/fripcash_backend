@@ -5,6 +5,7 @@
  *  - configuration affichée par l'app.
  * Un webhook valide ne fait qu'enregistrer l'événement et planifier une vérification par l'API.
  */
+import { randomBytes } from "crypto";
 import { Router, type Request, type Response } from "express";
 import rateLimit from "express-rate-limit";
 import { env } from "../config/env.js";
@@ -16,6 +17,7 @@ import { logger } from "../utils/logger.js";
 import { verifyCcpWebhook } from "../services/chapchappay.js";
 import { auditFinance, enqueue } from "../services/finance/core.js";
 import { schedulePayoutVerificationFromWebhook } from "../services/finance/payout-service.js";
+import { feeSchedule } from "../services/finance/fees.js";
 
 const webhookLimiter = rateLimit({ windowMs: 60_000, max: 300 });
 
@@ -64,10 +66,20 @@ paymentsPublicRouter.get("/config", (_req, res) => {
     minPaymentGnf: env.chapchapMinPaymentGnf,
     hostedPage: true,
     methods: ["OM_GN", "MTN_GN", "CHAPCHAPPAY"],
+    fees: feeSchedule(),
   });
 });
 
-/** Retour depuis la page Chap Chap Pay : renvoie vers l'app. N'atteste JAMAIS le paiement. */
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+}
+
+/**
+ * Retour depuis la page Chap Chap Pay : renvoie vers l'app (lien profond) ou, à défaut, vers le
+ * site FripCash. N'atteste JAMAIS le paiement : l'écran de l'app le vérifie auprès du serveur.
+ * Page HTML plutôt qu'une simple redirection : certains navigateurs Android refusent d'ouvrir une
+ * app sans geste de l'utilisateur, le bouton sert alors de secours.
+ */
 paymentsPublicRouter.get(
   "/return/:ref",
   ah(async (req, res) => {
@@ -75,9 +87,29 @@ paymentsPublicRouter.get(
     const payment = /^[A-Za-z0-9_-]{4,64}$/.test(ref)
       ? await Payment.findOne({ merchantTransactionId: ref }, "appReturnUrl merchantTransactionId").lean()
       : null;
-    const base = (payment?.appReturnUrl || "fripcash://paiement").replace(/\/$/, "");
-    const target = `${base}/${encodeURIComponent(payment?.merchantTransactionId || ref)}${req.query.cancel ? "?cancel=1" : ""}`;
-    res.redirect(302, target);
+    const reference = encodeURIComponent(payment?.merchantTransactionId || ref);
+    const query = req.query.cancel ? "?cancel=1" : "";
+    const appTarget = payment?.appReturnUrl ? `${payment.appReturnUrl.replace(/\/$/, "")}/${reference}${query}` : "";
+    const webTarget = `${env.appWebUrl}/paiement/${reference}${query}`;
+    const target = appTarget || webTarget;
+    const title = req.query.cancel ? "Paiement interrompu" : "Paiement terminé";
+    const nonce = randomBytes(12).toString("base64");
+    res.setHeader(
+      "Content-Security-Policy",
+      `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'`
+    );
+    res.setHeader("Cache-Control", "no-store");
+    res.type("html").send(`<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="0;url=${escapeHtml(target)}">
+<title>${title} · FripCash</title>
+<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#FBF5F1;font-family:system-ui,-apple-system,sans-serif;color:#2B1D16}
+main{max-width:360px;padding:32px 24px;text-align:center}h1{font-size:22px;margin:0 0 8px}p{color:#7A6A61;line-height:1.5;margin:0 0 24px}
+a{display:block;padding:14px 20px;border-radius:999px;background:#C0603C;color:#fff;text-decoration:none;font-weight:600;margin-bottom:12px}
+a.alt{background:transparent;color:#C0603C;border:1px solid #C0603C}</style></head>
+<body><main><h1>${title}</h1><p>Retour à FripCash pour voir la confirmation de ta commande…</p>
+<a href="${escapeHtml(target)}">Retourner dans FripCash</a>${appTarget ? `<a class="alt" href="${escapeHtml(webTarget)}">Ouvrir sur le site</a>` : ""}</main>
+<script nonce="${nonce}">location.replace(${JSON.stringify(target)});</script></body></html>`);
   })
 );
 

@@ -18,6 +18,8 @@ const conversationSchema = new Schema(
     participantIds: [{ type: Schema.Types.ObjectId, ref: "User" }],
     listingId: { type: Schema.Types.ObjectId, ref: "Listing", default: null },
     orderId: { type: Schema.Types.ObjectId, ref: "Order", default: null },
+    /** Commande : discussion entre deux parties (buyer_seller, seller_courier, buyer_courier). */
+    pair: { type: String, enum: ["buyer_seller", "seller_courier", "buyer_courier", null], default: null },
     lastMessage: { type: String, default: "" },
     lastMessageAt: { type: Date, default: Date.now },
   },

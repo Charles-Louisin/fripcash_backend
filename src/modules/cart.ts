@@ -15,6 +15,7 @@ import { hydrateOrder } from "../services/orders-hydrate.js";
 import { publicMediaUrl } from "../utils/public-url.js";
 import { isValidEmail, parseGnMobile } from "../services/gn-phone.js";
 import { paymentPublicView, restoreReservedStock } from "../services/payments.js";
+import { scopeOrderResponses } from "../serializers.js";
 import { startChapChapCheckout } from "../services/finance/payment-service.js";
 
 export const cartRouter = Router();
@@ -187,6 +188,7 @@ function bundleDiscountPercent(seller: any, items: { quantity: number }[]) {
 checkoutRouter.post(
   "/",
   requireAuth,
+  scopeOrderResponses,
   requireAudience("CONSUMER", "COURIER"),
   validate(checkoutSchema),
   ah(async (req, res) => {

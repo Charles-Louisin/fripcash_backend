@@ -8,9 +8,10 @@ import { hydrateOrder } from "../services/orders-hydrate.js";
 import { Order } from "../models/commerce.js";
 import { paymentPublicView, refreshPayment } from "../services/payments.js";
 import { verifyChapChapPayment } from "../services/finance/payment-service.js";
+import { scopeOrderResponses } from "../serializers.js";
 
 export const paymentsRouter = Router();
-paymentsRouter.use(requireAuth);
+paymentsRouter.use(requireAuth, scopeOrderResponses);
 
 paymentsRouter.get(
   "/:merchantTransactionId",
