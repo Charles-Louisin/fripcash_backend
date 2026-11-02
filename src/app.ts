@@ -17,7 +17,9 @@ import { cartRouter, checkoutRouter } from "./modules/cart.js";
 import { invoicesRouter, ordersRouter } from "./modules/orders.js";
 import { walletRouter } from "./modules/wallet.js";
 import { paymentsRouter } from "./modules/payments.js";
-import { cinetpayWebhookRouter } from "./modules/webhooks.js";
+import { paymentsPublicRouter, payoutsPublicRouter } from "./modules/finance-public.js";
+import { adminFinanceRouter } from "./modules/admin-finance.js";
+import { deliveriesRouter, sellerOrdersRouter } from "./modules/fulfillment-finance.js";
 import {
   conversationsRouter,
   favoritesRouter,
@@ -66,6 +68,11 @@ export function createApp() {
     })
   );
   app.use(compression());
+  // Webhooks Chap Chap Pay : la signature HMAC porte sur le corps BRUT, il ne doit pas être reparsé.
+  app.use(
+    ["/api/v1/payments/webhook", "/api/v1/payouts/webhook"],
+    express.raw({ type: () => true, limit: "256kb" })
+  );
   app.use("/api/v1/media", express.json({ limit: "16mb" }));
   app.use("/api/v1/me/seller/tools/excel-import", express.json({ limit: "8mb" }));
   app.use(express.json({ limit: "1mb" }));
@@ -115,9 +122,12 @@ export function createApp() {
   app.use("/api/v1/sellers", reviewsRouter);
   app.use("/api/v1/cart", cartRouter);
   app.use("/api/v1/checkout", checkoutRouter);
+  app.use("/api/v1/payments", paymentsPublicRouter);
   app.use("/api/v1/payments", paymentsRouter);
-  app.use("/api/v1/cpn", cinetpayWebhookRouter);
+  app.use("/api/v1/payouts", payoutsPublicRouter);
   app.use("/api/v1/orders", ordersRouter);
+  app.use("/api/v1/seller-orders", sellerOrdersRouter);
+  app.use("/api/v1/deliveries", deliveriesRouter);
   app.use("/api/v1/invoices", invoicesRouter);
   app.use("/api/v1/wallet", walletRouter);
   app.use("/api/v1/offers", offersRouter);
@@ -127,6 +137,7 @@ export function createApp() {
   app.use("/api/v1/reports", reportsRouter);
   app.use("/api/v1/disputes", disputesRouter);
   app.use("/api/v1/courier", courierRouter);
+  app.use("/api/v1/admin", adminFinanceRouter);
   app.use("/api/v1/admin", adminRouter);
   app.use("/api/v1/media", mediaRouter);
   app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));

@@ -3,7 +3,8 @@ import { getSettings } from "../services/notify.js";
 import { HttpError } from "../utils/http-error.js";
 import { verifyToken } from "../utils/jwt.js";
 
-const OPEN_PREFIXES = ["/api/v1/auth", "/api/v1/admin", "/api/v1/cpn", "/api/v1/payments", "/api/v1/health"];
+// Les webhooks de paiement et de reversement doivent toujours passer, même en maintenance.
+const OPEN_PREFIXES = ["/api/v1/auth", "/api/v1/admin", "/api/v1/payments", "/api/v1/payouts/webhook", "/api/v1/health"];
 const CACHE_MS = 15_000;
 
 let cached: { on: boolean; at: number } | null = null;

@@ -13,22 +13,9 @@ import { fulfillmentForShopKind } from "../utils/pricing.js";
 import { DeliveryTariff } from "../models/catalog.js";
 import { hydrateOrder } from "../services/orders-hydrate.js";
 import { publicMediaUrl } from "../utils/public-url.js";
-import { isValidEmail, parseGnMobile, splitPersonName } from "../services/gn-phone.js";
-import {
-  cinetpayNotifyUrl,
-  cinetpayReturnUrls,
-  initCinetPayPayment,
-  isFinalFailure,
-  isFinalSuccess,
-  throwIfHardFailure,
-  type CinetPayMethod,
-} from "../services/cinetpay.js";
-import {
-  MIN_PAYMENT_GNF,
-  paymentPublicView,
-  restoreReservedStock,
-  settleInboundPayment,
-} from "../services/payments.js";
+import { isValidEmail, parseGnMobile } from "../services/gn-phone.js";
+import { paymentPublicView, restoreReservedStock } from "../services/payments.js";
+import { startChapChapCheckout } from "../services/finance/payment-service.js";
 
 export const cartRouter = Router();
 cartRouter.use(requireAuth, requireAudience("CONSUMER", "COURIER"));
@@ -174,7 +161,9 @@ export const checkoutRouter = Router();
 
 const checkoutSchema = z.object({
   fulfillmentMode: z.enum(["courier", "pickup", "shopLocalDelivery"]).optional(),
-  paymentMethod: z.enum(["OM_GN", "MTN_GN", "CINETPAY"]),
+  paymentMethod: z.enum(["OM_GN", "MTN_GN", "CHAPCHAPPAY"]),
+  /** Lien de retour vers l'app après la page de paiement hébergée (validé côté serveur). */
+  appReturnUrl: z.string().max(300).optional(),
   address: z.string().min(3),
   city: z.string().optional(),
   phone: z.string().min(8),
@@ -206,7 +195,7 @@ checkoutRouter.post(
     if (!cart || cart.items.length === 0) throw badRequest("EMPTY_CART", "Panier vide");
 
     const body = req.body as z.infer<typeof checkoutSchema>;
-    const method = body.paymentMethod as CinetPayMethod;
+    const method = body.paymentMethod;
     const deliveryPhone = parseGnMobile(body.phone);
     if (!deliveryPhone) {
       throw badRequest(
@@ -404,7 +393,13 @@ checkoutRouter.post(
             email: body.email.trim(),
             paymentPhone: payPhone.e164,
           },
-          timeline: [{ status: "ORDERED", at: new Date(), note: "En attente de paiement CinetPay" }],
+          timeline: [
+            {
+              status: "ORDERED",
+              at: new Date(),
+              note: "En attente de paiement Chap Chap Pay",
+            },
+          ],
         });
         createdOrders.push(order);
         if (usedOffers.length) {
@@ -422,91 +417,21 @@ checkoutRouter.post(
         }
       }
 
-      const chargeGnf = createdOrders.reduce(
-        (s, o) => s + (o.amountGnf || 0) + (o.shippingCostGnf || 0),
-        0
-      );
-      if (chargeGnf < MIN_PAYMENT_GNF) {
-        throw badRequest(
-          "MIN_PAYMENT",
-          `Le montant minimum de paiement est de ${MIN_PAYMENT_GNF} GNF.`
-        );
-      }
-
-      const merchantTransactionId = `fc${createdOrders[0]._id.toString()}`.slice(0, 30);
-      const names = splitPersonName(body.name);
-      const returns = cinetpayReturnUrls(merchantTransactionId);
-      const payment = await Payment.create({
-        merchantTransactionId,
-        kind: "payment",
-        status: "pending",
-        paymentMethod: method,
-        amountGnf: chargeGnf,
-        phoneE164: payPhone.e164,
+      // Un ParentOrder, un paiement unique, redirection vers la page hébergée Chap Chap Pay.
+      const payment = await startChapChapCheckout({
+        orders: createdOrders,
         buyerId: user._id,
-        orderIds: createdOrders.map((o) => o._id),
+        method,
+        payPhone,
+        name: body.name,
+        email: body.email.trim(),
         reservedLines,
+        appReturnUrl: body.appReturnUrl,
       });
-      for (const order of createdOrders) {
-        order.paymentMerchantId = merchantTransactionId;
-        await order.save();
-      }
-
-      let result;
-      try {
-        result = await initCinetPayPayment({
-          merchantTransactionId,
-          amountGnf: chargeGnf,
-          method,
-          designation: "Commande FripCash",
-          email: body.email.trim(),
-          phoneE164: payPhone.e164,
-          firstName: names.first,
-          lastName: names.last,
-          notifyUrl: cinetpayNotifyUrl(),
-          successUrl: returns.successUrl,
-          failedUrl: returns.failedUrl,
-          directPay: false,
-        });
-      } catch (err) {
-        await settleInboundPayment(payment, {
-          code: 2010,
-          status: "FAILED",
-          message: err instanceof Error ? err.message : "Le paiement n'a pas abouti.",
-          mustRedirect: false,
-          raw: {},
-        });
-        throw err;
-      }
-      if (isFinalFailure(result.status) && result.status !== "PENDING" && result.status !== "INITIATED") {
-        await settleInboundPayment(payment, result);
-        throwIfHardFailure(result);
-        throw badRequest(result.status, result.message);
-      }
-      if (isFinalSuccess(result.status)) {
-        await settleInboundPayment(payment, result);
-      } else {
-        payment.notifyToken = result.notifyToken || payment.notifyToken;
-        payment.cinetpayTransactionId = result.transactionId || "";
-        payment.paymentUrl = result.paymentUrl || "";
-        payment.message = result.message;
-        payment.status = "pending";
-        await payment.save();
-      }
-
-      const fresh = (await Payment.findById(payment._id)) || payment;
       const orders = await Promise.all(
-        createdOrders.map(async (o) => {
-          const row = await Order.findById(o._id);
-          return hydrateOrder(row || o);
-        })
+        createdOrders.map(async (o) => hydrateOrder((await Order.findById(o._id)) || o))
       );
-      res.json({
-        payment: paymentPublicView(fresh, {
-          mustRedirect: Boolean(fresh.paymentUrl) || result.mustRedirect,
-        }),
-        orders,
-      });
+      res.json({ payment: paymentPublicView(payment, { mustRedirect: true }), orders });
     } catch (err) {
       const alreadySettled = createdOrders.some(
         (o) => o.status !== "ORDERED" && o.escrowStatus !== "pending"

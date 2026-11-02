@@ -6,24 +6,15 @@ function required(name: string, fallback?: string) {
   return value;
 }
 
-const cinetpayKey = (process.env.CINETPAY_ACCOUNT_KEY || "").trim();
-const cinetpayEnvRaw = (process.env.CINETPAY_ENV || "").toLowerCase();
-const cinetpayFromEnv =
-  cinetpayEnvRaw === "production" || cinetpayEnvRaw === "live"
-    ? "live"
-    : cinetpayEnvRaw === "sandbox" || cinetpayEnvRaw === "staging"
-      ? "sandbox"
-      : "";
-const cinetpayFromKey = cinetpayKey.startsWith("sk_test_")
-  ? "sandbox"
-  : cinetpayKey.startsWith("sk_live_")
-    ? "live"
-    : "";
-// CINETPAY_ENV wins: a staging merchant often has sk_live_ but must hit api.cinetpay.net
-const cinetpayIsLive = (cinetpayFromEnv || cinetpayFromKey || "sandbox") === "live";
-
 const nodeEnv = process.env.NODE_ENV || "development";
 const isProduction = nodeEnv === "production";
+
+const chapchapApiKey = (process.env.CHAPCHAPPAY_API_KEY || "").trim();
+function bool(name: string, fallback: boolean) {
+  const raw = (process.env[name] ?? "").trim().toLowerCase();
+  if (!raw) return fallback;
+  return raw === "true" || raw === "1" || raw === "yes";
+}
 
 export const env = {
   port: Number(process.env.PORT || 5000),
@@ -41,19 +32,31 @@ export const env = {
   resendApiKey: process.env.RESEND_API_KEY || "",
   resendFrom: process.env.RESEND_FROM || "FripCash <onboarding@resend.dev>",
   expoAccessToken: (process.env.EXPO_ACCESS_TOKEN || "").trim(),
-  cinetpayAccountKey: cinetpayKey,
-  cinetpayAccountPassword: (process.env.CINETPAY_ACCOUNT_PASSWORD || "").trim(),
-  cinetpayEnv: cinetpayIsLive ? "live" : "sandbox",
-  cinetpayEnvSource: cinetpayFromEnv
-    ? `env:${cinetpayFromEnv}`
-    : cinetpayFromKey
-      ? `key:${cinetpayFromKey}`
-      : "default:sandbox",
-  cinetpaySetupSecret: process.env.CINETPAY_SETUP_SECRET || "",
-  cinetpayCurrency: (process.env.CINETPAY_CURRENCY || "GNF").trim().toUpperCase(),
-  cinetpayBaseUrl: cinetpayIsLive
-    ? "https://api.cinetpay.co"
-    : "https://api.cinetpay.net",
+  chapchapBaseUrl: (process.env.CHAPCHAPPAY_BASE_URL || "https://chapchappay.com/api").replace(/\/$/, ""),
+  /** Clé de test ou de production : c'est la clé qui détermine le mode chez Chap Chap Pay. */
+  chapchapApiKey,
+  /** « Clé d'encryptage » du tableau de bord : signe les appels PUSH et les webhooks (HMAC-SHA256). */
+  chapchapEncryptionKey: (process.env.CHAPCHAPPAY_ENCRYPTION_KEY || "").trim(),
+  /** Code d'accès (6 chiffres) de l'Agent API qui porte la permission PUSH. */
+  chapchapPushAccessCode: (process.env.CHAPCHAPPAY_PUSH_ACCESS_CODE || "").trim(),
+  /** Mode test uniquement : accepte les numéros fictifs Chap Chap Pay (72… Orange, 76… MTN). Refusé en production. */
+  chapchapAcceptTestNumbers: !isProduction && bool("CHAPCHAPPAY_ACCEPT_TEST_NUMBERS", false),
+  /** deduct = frais retenus sur le compte marchand (montant client = montant commande). */
+  chapchapFeeHandling: ((process.env.CHAPCHAPPAY_FEE_HANDLING || "deduct") === "add" ? "add" : "deduct") as
+    | "add"
+    | "deduct",
+  chapchapMinPaymentGnf: Number(process.env.CHAPCHAPPAY_MIN_PAYMENT_GNF || 5000),
+  chapchapMinPayoutGnf: Number(process.env.CHAPCHAPPAY_MIN_PAYOUT_GNF || 1000),
+  chapchapTimeoutMs: Number(process.env.CHAPCHAPPAY_TIMEOUT_MS || 20_000),
+
+  /** Lance le worker financier dans le processus API (désactiver si un service worker dédié tourne). */
+  financeWorkerEnabled: bool("FINANCE_WORKER_ENABLED", true),
+  financeWorkerPollMs: Number(process.env.FINANCE_WORKER_POLL_MS || 5_000),
+  /** true : un reversement éligible part seul. false : l'admin le lance (individuel ou par lot). */
+  payoutAutoExecute: bool("PAYOUT_AUTO_EXECUTE", true),
+  payoutMaxAttempts: Number(process.env.PAYOUT_MAX_ATTEMPTS || 5),
+  /** Refuse d'écrire des opérations financières sans transactions MongoDB (replica set requis). */
+  financeRequireTransactions: bool("FINANCE_REQUIRE_TRANSACTIONS", isProduction),
 };
 
 export const isDev = env.nodeEnv !== "production";
@@ -67,5 +70,11 @@ export function assertSecureEnv() {
   }
   if (env.otpDevEcho) {
     throw new Error("OTP_DEV_ECHO cannot be enabled in production.");
+  }
+  if (!env.chapchapApiKey || !env.chapchapEncryptionKey) {
+    throw new Error("CHAPCHAPPAY_API_KEY and CHAPCHAPPAY_ENCRYPTION_KEY are required in production.");
+  }
+  if (!env.publicApiUrl.startsWith("https://")) {
+    throw new Error("PUBLIC_API_URL must be HTTPS: Chap Chap Pay only calls HTTPS webhooks.");
   }
 }

@@ -8,11 +8,13 @@ import { ah } from "../utils/async-handler.js";
 import { badRequest, forbidden, notFound } from "../utils/http-error.js";
 import { sid } from "../utils/ids.js";
 import { hydrateCourierOrder } from "../services/orders-hydrate.js";
-import { payCourierDeliveryFee } from "../services/payments.js";
 import { notifyOrderParties } from "../services/notify.js";
 import { announceCourierInChat } from "../services/courier-announce.js";
 import { courierCoversZone } from "../utils/courier-zones.js";
+import { assignCourier, isFinancialOrder, updateDeliveryProgress } from "../services/finance/delivery-service.js";
 import mongoose from "mongoose";
+
+const DELIVERY_PROGRESS = { COLLECTED: "picked_up", IN_TRANSIT: "in_transit", DELIVERED: "delivered" } as const;
 
 export const courierRouter = Router();
 courierRouter.use(requireAuth, requireAudience("COURIER"));
@@ -325,6 +327,7 @@ courierRouter.post(
     row.status = "COURIER_ASSIGNED";
     row.timeline.push({ status: "COURIER_ASSIGNED", at: new Date() });
     await row.save();
+    if (isFinancialOrder(row)) await assignCourier(row._id, user._id);
     await announceCourierInChat(row, user);
     await notifyOrderParties(row, "COURIER_ASSIGNED", `${user.name} a accepté la course`);
     res.json(await hydrateCourierOrder(row, sid(user._id)));
@@ -354,11 +357,11 @@ courierRouter.post(
     }
     row.status = req.body.status;
     row.timeline.push({ status: req.body.status, at: new Date() });
-    if (req.body.status === "DELIVERED") {
-      const courier = (req as AuthedRequest).userDoc!;
-      await payCourierDeliveryFee(row, courier);
-    }
+    // La rémunération dépend de la confirmation du CLIENT (déjà enregistrée), jamais du livreur.
     await row.save();
+    if (isFinancialOrder(row)) {
+      await updateDeliveryProgress(row._id, DELIVERY_PROGRESS[req.body.status as keyof typeof DELIVERY_PROGRESS]);
+    }
     await notifyOrderParties(row, req.body.status);
     res.json(await hydrateCourierOrder(row, uid));
   })
@@ -381,6 +384,7 @@ courierRouter.post(
       note: `Transfert vers ${next.name}`,
     });
     await row.save();
+    if (isFinancialOrder(row)) await assignCourier(row._id, next._id);
     await announceCourierInChat(row, next);
     res.json(await hydrateCourierOrder(row, (req as AuthedRequest).userId!));
   })

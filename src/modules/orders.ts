@@ -17,15 +17,45 @@ import {
 } from "../services/notify.js";
 import { hydrateCourierOrder, hydrateOrder } from "../services/orders-hydrate.js";
 import { buildSalesChart } from "../services/stats.js";
-import {
-  payCourierDeliveryFee,
-  payoutOrderToSeller,
-  refundOrderToBuyer,
-} from "../services/payments.js";
+import { legacyOrderError } from "../services/payments.js";
 import { User } from "../models/user.js";
+import {
+  confirmDelivery,
+  confirmSellerOrderReceipt,
+  holdForDispute,
+  isFinancialOrder,
+  refundSellerOrder,
+} from "../services/finance/delivery-service.js";
+import { sellerOrderFinancialView } from "../services/finance/views.js";
+import type { Request, Response } from "express";
 
 export const ordersRouter = Router();
 ordersRouter.use(requireAuth);
+
+/** Commande du système financier : réception = éligibilité du vendeur (le worker paie ensuite). */
+async function financialReceipt(row: any, req: AuthedRequest, role: "buyer" | "admin" | "seller_code") {
+  await confirmSellerOrderReceipt(row._id, { userId: req.userId!, role });
+}
+
+/** Commande antérieure à Chap Chap Pay : la réception est notée, le règlement est fait à la main. */
+async function flagLegacySettlement(row: any) {
+  row.timeline.push({ status: row.status, at: new Date(), note: "Règlement vendeur à effectuer manuellement (ancienne commande)" });
+  await row.save();
+  await notifyAdmins(
+    "order",
+    "Ancienne commande à régler",
+    `${row.items?.[0]?.title || "Commande"} : réception confirmée, reversement vendeur à faire manuellement.`,
+    { orderId: sid(row._id) }
+  );
+}
+
+async function financialCourierConfirmation(row: any, req: AuthedRequest) {
+  if (!row.deliveryId || !row.courierId) return;
+  await confirmDelivery(row.deliveryId, {
+    method: req.audience === "ADMIN" ? "admin_validation" : "buyer_confirmation",
+    by: req.userId!,
+  });
+}
 
 const TRANSITIONS: Record<string, string[]> = {
   ORDERED: ["PAID", "REFUNDED", "DISPUTED"],
@@ -42,10 +72,6 @@ const TRANSITIONS: Record<string, string[]> = {
   DISPUTED: ["REFUNDED", "FUNDS_RELEASED"],
   REFUNDED: [],
 };
-
-function orderNet(row: { items: any[] }) {
-  return row.items.reduce((s, i: any) => s + (i.netPriceGnf || 0) * (i.quantity || 1), 0);
-}
 
 ordersRouter.get(
   "/purchases",
@@ -143,14 +169,18 @@ ordersRouter.patch(
           : "Aucun livreur disponible dans cette zone";
     }
 
-    const net = orderNet(row);
-    if (next === "FUNDS_RELEASED" && (row.escrowStatus === "held" || row.escrowStatus === "payout_pending")) {
-      await payoutOrderToSeller(row, net, "Libération séquestre FripCash");
+    if (isFinancialOrder(row) && next === "FUNDS_RELEASED") {
+      // Le statut FUNDS_RELEASED est posé par le worker quand le transfert est vérifié réussi.
+      await financialReceipt(row, req as AuthedRequest, (req as AuthedRequest).audience === "ADMIN" ? "admin" : "buyer");
+    } else if (isFinancialOrder(row) && next === "REFUNDED" && row.escrowStatus === "held") {
+      await refundSellerOrder(row._id, "Remboursement commande FripCash", (req as AuthedRequest).userId!);
+    } else if (next === "FUNDS_RELEASED" && (row.escrowStatus === "held" || row.escrowStatus === "payout_pending")) {
+      throw legacyOrderError();
     } else if (
       next === "REFUNDED" &&
       (row.escrowStatus === "held" || row.escrowStatus === "refund_pending")
     ) {
-      await refundOrderToBuyer(row, net, "Remboursement commande FripCash");
+      throw legacyOrderError();
     } else {
       row.status = next;
       row.timeline.push({ status: next, at: new Date(), note });
@@ -163,9 +193,8 @@ ordersRouter.patch(
   })
 );
 
-ordersRouter.post(
-  "/:id/confirm-reception",
-  ah(async (req, res) => {
+/** Partagé par POST /orders/:id/confirm-reception et POST /seller-orders/:id/confirm-receipt. */
+export const confirmReceptionHandler = ah(async (req: Request, res: Response) => {
     const row = await Order.findById(req.params.id);
     if (!row) throw notFound();
     const uid = (req as AuthedRequest).userId!;
@@ -198,9 +227,11 @@ ordersRouter.post(
     let courier: any = null;
     if (firstConfirmation && row.courierId) {
       courier = await User.findById(row.courierId);
-      if (courier) await payCourierDeliveryFee(row, courier);
     }
     await row.save();
+    if (firstConfirmation && isFinancialOrder(row)) {
+      await financialCourierConfirmation(row, req as AuthedRequest);
+    }
     if (firstConfirmation) {
       await notifyOrderParties(
         { _id: row._id, buyerId: row.buyerId, sellerId: row.sellerId },
@@ -217,12 +248,32 @@ ordersRouter.post(
         );
       }
     }
-    if (row.escrowStatus === "held" || row.escrowStatus === "payout_pending") {
-      await payoutOrderToSeller(row, orderNet(row), "Libération séquestre FripCash");
+    if (isFinancialOrder(row)) {
+      await financialReceipt(row, req as AuthedRequest, (req as AuthedRequest).audience === "ADMIN" && sid(row.buyerId) !== uid ? "admin" : "buyer");
+    } else if (row.escrowStatus === "held" || row.escrowStatus === "payout_pending") {
+      await flagLegacySettlement(row);
     }
     const fresh = await Order.findById(row._id);
     if (!fresh) throw notFound();
     res.json(await hydrateOrder(fresh));
+});
+
+ordersRouter.post("/:id/confirm-reception", confirmReceptionHandler);
+
+/** Synthèse financière : le vendeur ne voit que SA sous-commande ; l'acheteur, ses totaux. */
+ordersRouter.get(
+  "/:id/financial-summary",
+  ah(async (req, res) => {
+    res.json(await sellerOrderFinancialView(String(req.params.id), req as AuthedRequest));
+  })
+);
+
+ordersRouter.get(
+  "/:id/seller-orders",
+  ah(async (req, res) => {
+    const view = await sellerOrderFinancialView(String(req.params.id), req as AuthedRequest);
+    if (!("sellerOrders" in view)) throw forbidden();
+    res.json(view.sellerOrders);
   })
 );
 
@@ -335,8 +386,11 @@ ordersRouter.post(
     });
     await row.save();
     await notifyOrderParties(row, "DELIVERED", "Retrait validé par code — colis remis à l'acheteur");
-    if (row.escrowStatus === "held" || row.escrowStatus === "payout_pending") {
-      await payoutOrderToSeller(row, orderNet(row), "Libération séquestre FripCash");
+    if (isFinancialOrder(row)) {
+      // Le code à 6 chiffres détenu par l'acheteur prouve la remise : équivalent d'un OTP.
+      await financialReceipt(row, req as AuthedRequest, "seller_code");
+    } else if (row.escrowStatus === "held" || row.escrowStatus === "payout_pending") {
+      await flagLegacySettlement(row);
     }
     const fresh = await Order.findById(row._id);
     if (!fresh) throw notFound();
@@ -366,16 +420,13 @@ ordersRouter.post(
     if (["FUNDS_RELEASED", "FEEDBACK_PENDING", "REFUNDED"].includes(row.status)) {
       throw badRequest("DISPUTE_CLOSED", "Le paiement est déjà clôturé : un litige n'est plus possible.");
     }
-    if (row.status === "DELIVERED") {
-      const settings = await getSettings();
-      const hours = Number(settings.disputeWindowHours) || 72;
-      const deliveredAt = [...(row.timeline || [])].reverse().find((t: any) => t.status === "DELIVERED")?.at;
-      if (deliveredAt && Date.now() - new Date(deliveredAt).getTime() > hours * 3_600_000) {
-        throw badRequest(
-          "DISPUTE_WINDOW",
-          `Le délai pour ouvrir un litige (${hours} h après la livraison) est dépassé.`
-        );
-      }
+    // Réception confirmée (« Colis reçu » ou code de retrait) = acceptation définitive du colis :
+    // le vendeur est payé à cet instant, aucun litige n'est plus possible sur cette commande.
+    if (row.buyerConfirmedAt) {
+      throw badRequest(
+        "DISPUTE_AFTER_RECEIPT",
+        "La réception a été confirmée : un litige n'est plus possible pour cette commande."
+      );
     }
     row.status = "DISPUTED";
     row.disputeReason = req.body.reason;
@@ -387,6 +438,10 @@ ordersRouter.post(
       openerRole: role,
       reason: req.body.reason,
     });
+    if (isFinancialOrder(row)) {
+      // Bloque uniquement la somme de CE vendeur ; les autres sous-commandes continuent.
+      await holdForDispute(row._id, dispute._id, req.body.reason);
+    }
     const data = { disputeId: sid(dispute._id), orderId: sid(row._id) };
     await notify(sid(row.buyerId), "dispute", "Litige ouvert", req.body.reason, data);
     await notify(sid(row.sellerId), "dispute", "Litige ouvert", req.body.reason, data);
@@ -442,9 +497,11 @@ ordersRouter.post(
     if (row.escrowStatus !== "held" && row.escrowStatus !== "refund_pending") {
       throw badRequest("ESCROW", "Séquestre déjà clôturé");
     }
-    const net = orderNet(row);
-    const amount = req.body.amount === "full" || !req.body.amount ? net : Number(req.body.amount);
-    await refundOrderToBuyer(row, amount, "Remboursement vendeur FripCash");
+    if (isFinancialOrder(row)) {
+      await refundSellerOrder(row._id, "Remboursement vendeur FripCash", (req as AuthedRequest).userId!);
+    } else {
+      throw legacyOrderError();
+    }
     const fresh = await Order.findById(row._id);
     if (!fresh) throw notFound();
     res.json(await hydrateOrder(fresh));
@@ -533,8 +590,10 @@ ordersRouter.post(
     if (row.offerStatus !== "refused") {
       throw badRequest("OFFER_NOT_REFUSED", "L'offre n'a pas été refusée");
     }
-    if (row.escrowStatus === "held" || row.escrowStatus === "refund_pending") {
-      await refundOrderToBuyer(row, orderNet(row), "Annulation après refus d'offre");
+    if (isFinancialOrder(row) && row.escrowStatus === "held") {
+      await refundSellerOrder(row._id, "Annulation après refus d'offre", (req as AuthedRequest).userId!);
+    } else if (row.escrowStatus === "held" || row.escrowStatus === "refund_pending") {
+      throw legacyOrderError();
     } else {
       row.status = "REFUNDED";
       row.escrowStatus = "refunded";

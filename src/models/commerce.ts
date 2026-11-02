@@ -61,6 +61,30 @@ const orderSchema = new Schema(
     },
     courierName: { type: String, default: null },
     buyerConfirmedAt: { type: Date, default: null },
+    // ── Système financier Chap Chap Pay. Absent = commande antérieure, réglée manuellement.
+    parentOrderId: { type: Schema.Types.ObjectId, ref: "ParentOrder", default: null, index: true },
+    orderNumber: { type: String, default: null },
+    deliveryId: { type: Schema.Types.ObjectId, ref: "Delivery", default: null },
+    payoutId: { type: Schema.Types.ObjectId, ref: "Payout", default: null },
+    payoutStatus: {
+      type: String,
+      enum: ["not_eligible", "eligible", "pending", "processing", "paid", "failed", "blocked", "refunded"],
+      default: "not_eligible",
+    },
+    /** Photographie figée à la commande : un changement de taux ne s'applique jamais rétroactivement. */
+    financialDetails: {
+      type: {
+        productsSubtotal: Number,
+        discount: Number,
+        platformCommissionRate: Number,
+        platformCommissionAmount: Number,
+        sellerNetAmount: Number,
+        deliveryAmount: Number,
+        currency: String,
+      },
+      default: null,
+      _id: false,
+    },
     timeline: {
       type: [{ status: String, at: Date, note: String }],
       default: [],
@@ -98,25 +122,38 @@ const reservedLineSchema = new Schema(
 const paymentSchema = new Schema(
   {
     merchantTransactionId: { type: String, required: true, unique: true },
-    cinetpayTransactionId: { type: String, default: "", index: true },
-    notifyToken: { type: String, default: "" },
+    /** Référence de la transaction chez le prestataire (payment_reference). */
+    providerReference: { type: String, default: "", index: true },
     kind: {
       type: String,
       enum: ["payment", "payout", "refund", "withdrawal", "delivery", "split"],
       required: true,
       index: true,
     },
+    /** success = payé. canceled/failed ne sont pas définitifs chez Chap Chap Pay (succès tardif possible). */
     status: {
       type: String,
-      enum: ["pending", "success", "failed", "expired"],
+      enum: ["pending", "success", "failed", "expired", "canceled", "partially_refunded", "refunded"],
       default: "pending",
       index: true,
     },
     paymentMethod: {
       type: String,
-      enum: ["OM_GN", "MTN_GN", "CINETPAY"],
+      enum: ["OM_GN", "MTN_GN", "CHAPCHAPPAY"],
       required: true,
     },
+    /** null = paiement antérieur à Chap Chap Pay (historique, figé). */
+    provider: { type: String, enum: ["chapchappay", null], default: null },
+    parentOrderId: { type: Schema.Types.ObjectId, ref: "ParentOrder", default: null },
+    providerOperationId: { type: String, default: "", index: true },
+    providerStatus: { type: String, default: "" },
+    providerResponse: { type: Schema.Types.Mixed, default: null },
+    /** Lien de retour vers l'app, validé côté serveur (jamais un lien arbitraire du client). */
+    appReturnUrl: { type: String, default: "" },
+    paidAt: { type: Date, default: null },
+    verifiedAt: { type: Date, default: null },
+    /** Succès reçu après libération du stock : remboursement à traiter par un admin. */
+    requiresReview: { type: Boolean, default: false },
     amountGnf: { type: Number, required: true },
     currency: { type: String, default: "GNF" },
     phoneE164: { type: String, default: "" },
@@ -124,12 +161,16 @@ const paymentSchema = new Schema(
     userId: { type: Schema.Types.ObjectId, ref: "User", default: null, index: true },
     orderIds: [{ type: Schema.Types.ObjectId, ref: "Order" }],
     reservedLines: { type: [reservedLineSchema], default: [] },
-    lastNotifyTransactionId: { type: String, default: "" },
     processedAt: { type: Date, default: null },
     message: { type: String, default: "" },
     paymentUrl: { type: String, default: "" },
   },
   { timestamps: true }
+);
+// Un seul paiement client par ParentOrder.
+paymentSchema.index(
+  { parentOrderId: 1 },
+  { unique: true, partialFilterExpression: { parentOrderId: { $type: "objectId" }, kind: "payment" } }
 );
 
 export const Cart = mongoose.model("Cart", cartSchema);

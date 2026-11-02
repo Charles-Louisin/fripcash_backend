@@ -7,8 +7,14 @@
     "dev": "nodemon",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
+    "start:worker": "node dist/worker.js",
     "seed": "tsx scripts/seed.ts",
-    "seed:shops": "tsx scripts/seed-shops.ts"
+    "seed:shops": "tsx scripts/seed-shops.ts",
+    "finance:audit": "tsx scripts/finance-audit.ts",
+    "ccp:check": "tsx scripts/ccp-live-check.ts",
+    "db:local": "tsx scripts/local-replset.ts",
+    "test": "node --import tsx --test --test-concurrency=1 test/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
@@ -34,6 +40,7 @@
     "@types/express": "^5.0.3",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.18.0",
+    "mongodb-memory-server": "^10.4.3",
     "nodemon": "^3.1.14",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2"

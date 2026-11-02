@@ -1,7 +1,8 @@
 import { badRequest } from "../utils/http-error.js";
 import { sid } from "../utils/ids.js";
 import { notify, notifyAdmins } from "./notify.js";
-import { payoutOrderToSeller, refundOrderToBuyer, splitEscrow } from "./payments.js";
+import { legacyOrderError } from "./payments.js";
+import { isFinancialOrder, resolveFinancialDispute } from "./finance/delivery-service.js";
 
 export type DisputeOutcome = "refund_buyer" | "release_seller" | "partial_refund";
 export type DisputeActor = "admin" | "buyer" | "seller";
@@ -19,13 +20,6 @@ const ACTOR_LABEL: Record<DisputeActor, string> = {
   buyer: "L'acheteur",
   seller: "Le vendeur",
 };
-
-function orderNet(order: any) {
-  return (order.items || []).reduce(
-    (s: number, i: any) => s + (i.netPriceGnf || 0) * (i.quantity || 1),
-    0
-  );
-}
 
 function decisionCopy(outcome: DisputeOutcome, actor: DisputeActor, buyerPercent: number) {
   const who = ACTOR_LABEL[actor];
@@ -60,44 +54,40 @@ export async function resolveDispute(
   if (d.status === "resolved") {
     throw badRequest("ALREADY_RESOLVED", "Ce litige a déjà été tranché.");
   }
-  const net = orderNet(order);
-  const held = (s: string) => order.escrowStatus === "held" || order.escrowStatus === s;
   let buyerPercent = outcome === "refund_buyer" ? 100 : outcome === "release_seller" ? 0 : 50;
-
-  if (outcome === "refund_buyer") {
-    if (held("refund_pending")) {
-      await refundOrderToBuyer(order, net, "Litige — remboursement acheteur");
-    } else {
-      order.status = "REFUNDED";
-      order.escrowStatus = "refunded";
-      order.timeline.push({ status: "REFUNDED", at: new Date(), note: "Litige — acheteur remboursé" });
-      await order.save();
-    }
-  } else if (outcome === "release_seller") {
-    if (held("payout_pending")) {
-      await payoutOrderToSeller(order, net, "Litige — libération vendeur");
-    } else {
-      order.status = "FUNDS_RELEASED";
-      order.escrowStatus = "released";
-      order.timeline.push({ status: "FUNDS_RELEASED", at: new Date(), note: "Litige — vendeur payé" });
-      await order.save();
-    }
-  } else {
+  if (outcome === "partial_refund") {
     buyerPercent = Math.round(Math.min(100, Math.max(0, Number(opts.buyerPercent ?? 50))));
-    const buyerAmt = Math.round((net * buyerPercent) / 100);
-    const sellerAmt = net - buyerAmt;
-    if (order.escrowStatus === "held") {
-      await splitEscrow(order, buyerAmt, sellerAmt);
-    } else {
-      order.status = "FUNDS_RELEASED";
-      order.escrowStatus = "released";
-      order.timeline.push({
-        status: "FUNDS_RELEASED",
-        at: new Date(),
-        note: `Litige partagé — ${buyerPercent} % acheteur / ${100 - buyerPercent} % vendeur`,
-      });
+  }
+
+  if (isFinancialOrder(order)) {
+    // Remboursement = opération Refund distincte ; reversement vendeur = son propre Payout.
+    // Les transferts sont exécutés ensuite par le worker, indépendamment.
+    await resolveFinancialDispute(order, outcome, { buyerPercent, actorId: opts.actorId, disputeId: d._id });
+    if (outcome === "release_seller" || outcome === "partial_refund") {
+      order.status = "DELIVERED";
+      order.timeline.push({ status: "DELIVERED", at: new Date(), note: "Litige tranché — reversement vendeur planifié" });
       await order.save();
     }
+  } else if (["held", "payout_pending", "refund_pending"].includes(String(order.escrowStatus))) {
+    // Ancienne commande dont l'argent n'est pas dans le système Chap Chap Pay.
+    throw legacyOrderError();
+  } else if (outcome === "refund_buyer") {
+    order.status = "REFUNDED";
+    order.escrowStatus = "refunded";
+    order.timeline.push({ status: "REFUNDED", at: new Date(), note: "Litige — acheteur remboursé" });
+    await order.save();
+  } else {
+    order.status = "FUNDS_RELEASED";
+    order.escrowStatus = "released";
+    order.timeline.push({
+      status: "FUNDS_RELEASED",
+      at: new Date(),
+      note:
+        outcome === "release_seller"
+          ? "Litige — vendeur payé"
+          : `Litige partagé — ${buyerPercent} % acheteur / ${100 - buyerPercent} % vendeur`,
+    });
+    await order.save();
   }
 
   const copy = decisionCopy(outcome, opts.actor, buyerPercent);
