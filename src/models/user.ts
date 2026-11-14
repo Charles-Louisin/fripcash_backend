@@ -143,5 +143,6 @@ const userSchema = new Schema(
 
 userSchema.index({ authAudience: 1 });
 userSchema.index({ "seller.verificationStatus": 1 });
+userSchema.index({ "seller.kind": 1, "seller.shopKind": 1 });
 
 export const User = mongoose.model("User", userSchema);

@@ -44,6 +44,9 @@ const listingSchema = new Schema(
 
 listingSchema.index({ status: 1, destination: 1 });
 listingSchema.index({ categoryId: 1 });
+// Fil des nouveautés et articles d'une boutique (requêtes les plus fréquentes de l'app).
+listingSchema.index({ status: 1, createdAt: -1 });
+listingSchema.index({ sellerId: 1, status: 1 });
 
 export const Listing = mongoose.model("Listing", listingSchema);
 

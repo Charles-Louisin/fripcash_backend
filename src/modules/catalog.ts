@@ -74,6 +74,51 @@ catalogRouter.get(
   })
 );
 
+/** Boutiques visibles pour un univers (mêmes règles pour la liste et pour les compteurs). */
+function shopKindFilter(shopKind: string, createdWithinDays = 0): Record<string, unknown> {
+  const filter: Record<string, unknown> = {
+    seller: { $ne: null },
+  };
+  if (shopKind === "particulier") {
+    filter["seller.kind"] = "particulier";
+  } else if (shopKind === "standard" || shopKind === "proximite" || shopKind === "enseigne") {
+    filter["seller.kind"] = "boutique";
+    filter["seller.shopKind"] = shopKind;
+    if (shopKind === "proximite" || shopKind === "enseigne") {
+      filter["seller.verificationStatus"] = "approved";
+    }
+  } else if (createdWithinDays > 0) {
+    filter["seller.kind"] = "boutique";
+    filter["seller.verificationStatus"] = "approved";
+  } else {
+    filter.$or = [
+      { "seller.kind": "particulier" },
+      {
+        "seller.kind": "boutique",
+        "seller.shopKind": "standard",
+      },
+      {
+        "seller.kind": "boutique",
+        "seller.shopKind": { $in: ["proximite", "enseigne"] },
+        "seller.verificationStatus": "approved",
+      },
+    ];
+  }
+  return filter;
+}
+
+const SHOP_KINDS = ["particulier", "standard", "proximite", "enseigne"] as const;
+
+/** Nombre de boutiques par univers : évite de télécharger toutes les boutiques pour les compter. */
+catalogRouter.get(
+  "/shops/counts",
+  ah(async (_req, res) => {
+    const counts = await Promise.all(SHOP_KINDS.map((k) => User.countDocuments(shopKindFilter(k))));
+    res.set("Cache-Control", "public, max-age=60");
+    res.json(Object.fromEntries(SHOP_KINDS.map((k, i) => [k, counts[i]])));
+  })
+);
+
 catalogRouter.get(
   "/shops",
   optionalAuth,
@@ -85,34 +130,7 @@ catalogRouter.get(
     const dateFrom = req.query.dateFrom ? new Date(String(req.query.dateFrom)) : null;
     const dateTo = req.query.dateTo ? new Date(String(req.query.dateTo)) : null;
     const limit = Math.min(80, Math.max(1, Number(req.query.limit) || 24));
-    const filter: Record<string, unknown> = {
-      seller: { $ne: null },
-    };
-    if (shopKind === "particulier") {
-      filter["seller.kind"] = "particulier";
-    } else if (shopKind === "standard" || shopKind === "proximite" || shopKind === "enseigne") {
-      filter["seller.kind"] = "boutique";
-      filter["seller.shopKind"] = shopKind;
-      if (shopKind === "proximite" || shopKind === "enseigne") {
-        filter["seller.verificationStatus"] = "approved";
-      }
-    } else if (createdWithinDays > 0) {
-      filter["seller.kind"] = "boutique";
-      filter["seller.verificationStatus"] = "approved";
-    } else {
-      filter.$or = [
-        { "seller.kind": "particulier" },
-        {
-          "seller.kind": "boutique",
-          "seller.shopKind": "standard",
-        },
-        {
-          "seller.kind": "boutique",
-          "seller.shopKind": { $in: ["proximite", "enseigne"] },
-          "seller.verificationStatus": "approved",
-        },
-      ];
-    }
+    const filter = shopKindFilter(shopKind, createdWithinDays);
     if (createdWithinDays > 0 || dateFrom || dateTo) {
       const range: Record<string, Date> = {};
       if (createdWithinDays > 0) {
@@ -153,13 +171,21 @@ catalogRouter.get(
       .sort({ "seller.shopCreatedAt": -1, createdAt: -1 })
       .limit(limit)
       .lean();
-    const stats = await reviewStatsForSellers(users.map((u) => u._id));
-    const counts = users.length
-      ? await Listing.aggregate<{ _id: unknown; n: number; categories: unknown[] }>([
+    const uid = (req as AuthedRequest).userId;
+    const ids = users.map((u) => u._id);
+    // Requêtes indépendantes : lancées en parallèle plutôt qu'à la suite.
+    const [stats, counts, likedRows] = await Promise.all([
+      reviewStatsForSellers(ids),
+      users.length
+        ? Listing.aggregate<{ _id: unknown; n: number; categories: unknown[] }>([
           { $match: { sellerId: { $in: users.map((u) => u._id) }, status: "ACTIVE" } },
-          { $group: { _id: "$sellerId", n: { $sum: 1 }, categories: { $addToSet: "$categoryId" } } },
-        ])
-      : [];
+            { $group: { _id: "$sellerId", n: { $sum: 1 }, categories: { $addToSet: "$categoryId" } } },
+          ])
+        : [],
+      uid && users.length
+        ? SellerLike.find({ userId: uid, sellerId: { $in: ids } }).select("sellerId").lean()
+        : [],
+    ]);
     const categoryIds = [...new Set(counts.flatMap((c) => c.categories.filter(Boolean).map(String)))];
     const categoryNames = new Map(
       (categoryIds.length ? await Category.find({ _id: { $in: categoryIds } }).lean() : []).map((c) => [
@@ -168,16 +194,7 @@ catalogRouter.get(
       ])
     );
     const countMap = new Map(counts.map((c) => [String(c._id), c]));
-    const uid = (req as AuthedRequest).userId;
-    const liked = new Set(
-      uid && users.length
-        ? (
-            await SellerLike.find({ userId: uid, sellerId: { $in: users.map((u) => u._id) } })
-              .select("sellerId")
-              .lean()
-          ).map((l) => String(l.sellerId))
-        : []
-    );
+    const liked = new Set(likedRows.map((l) => String(l.sellerId)));
     const shops = users.map((u) => {
       const row = countMap.get(String(u._id));
       return toPublicShop(u, stats.get(String(u._id)), {

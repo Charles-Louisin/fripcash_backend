@@ -46,6 +46,25 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
     });
   }
 
+  // Identifiant mal formé (ex. /orders/abc) : erreur du client, pas du serveur.
+  if (name === "CastError" || name === "BSONError") {
+    logger.warn({ path: req.originalUrl, method: req.method }, `FAIL ${req.method} ${req.originalUrl} → 400 BAD_ID`);
+    return res.status(400).json({ statusCode: 400, code: "BAD_ID", message: "Identifiant invalide", locale });
+  }
+
+  // Erreurs de lecture du corps (JSON invalide, trop volumineux…) : statut 4xx fourni par body-parser.
+  const status = Number(err?.status || err?.statusCode);
+  if (err?.expose && status >= 400 && status < 500) {
+    const code = status === 413 ? "PAYLOAD_TOO_LARGE" : "BAD_REQUEST";
+    logger.warn({ path: req.originalUrl, method: req.method, code }, `FAIL ${req.method} ${req.originalUrl} → ${status} ${code}`);
+    return res.status(status).json({
+      statusCode: status,
+      code,
+      message: status === 413 ? "Requête trop volumineuse" : "Requête invalide",
+      locale,
+    });
+  }
+
   logger.error({ err, path: req.originalUrl, method: req.method }, "Unhandled error");
   return res.status(500).json({
     statusCode: 500,

@@ -80,6 +80,35 @@ const TRANSITIONS: Record<string, string[]> = {
   REFUNDED: [],
 };
 
+type OrderRole = "buyer" | "seller" | "courier";
+/**
+ * Qui peut demander chaque statut (hors admin). Sans cette table, n'importe quel compte connecté
+ * pouvait faire avancer la commande d'un autre (ex. ORDERED → PAID sans paiement).
+ * PAID n'est jamais posé par un client : c'est la vérification du prestataire de paiement.
+ */
+const STATUS_ROLES: Record<string, OrderRole[]> = {
+  PAID: [],
+  SELLER_NOTIFIED: ["seller"],
+  PREPARING: ["seller"],
+  READY_FOR_PICKUP: ["seller"],
+  COURIER_ASSIGNED: ["courier"],
+  COLLECTED: ["courier"],
+  IN_TRANSIT: ["seller", "courier"],
+  DELIVERED: ["seller", "courier"],
+  DISPUTED: ["buyer", "seller"],
+  FUNDS_RELEASED: ["buyer"],
+  REFUNDED: ["seller"],
+  FEEDBACK_PENDING: ["buyer"],
+};
+
+function rolesInOrder(row: { buyerId?: unknown; sellerId?: unknown; courierId?: unknown }, uid: string) {
+  const roles: OrderRole[] = [];
+  if (sid(row.buyerId) === uid) roles.push("buyer");
+  if (sid(row.sellerId) === uid) roles.push("seller");
+  if (row.courierId && sid(row.courierId) === uid) roles.push("courier");
+  return roles;
+}
+
 ordersRouter.get(
   "/purchases",
   ah(async (req, res) => {
@@ -129,6 +158,12 @@ ordersRouter.patch(
     if (!row) throw notFound();
     const uid = (req as AuthedRequest).userId!;
     const next = req.body.status;
+    if ((req as AuthedRequest).audience !== "ADMIN") {
+      // Autorisation AVANT toute validation métier : un tiers n'apprend rien de la commande.
+      const mine = rolesInOrder(row, uid);
+      if (!mine.length) throw forbidden();
+      if (!(STATUS_ROLES[next] || []).some((role) => mine.includes(role))) throw forbidden();
+    }
     const allowed = TRANSITIONS[row.status] || [];
     if (!allowed.includes(next) && (req as AuthedRequest).audience !== "ADMIN") {
       throw badRequest("ILLEGAL_TRANSITION", `Transition ${row.status} → ${next} interdite`);

@@ -3,6 +3,7 @@ import { sid } from "../utils/ids.js";
 import { notify, notifyAdmins } from "./notify.js";
 import { legacyOrderError } from "./payments.js";
 import { isFinancialOrder, resolveFinancialDispute } from "./finance/delivery-service.js";
+import { refreshParentOrderStatus } from "./finance/financial-service.js";
 
 export type DisputeOutcome = "refund_buyer" | "release_seller" | "partial_refund";
 export type DisputeActor = "admin" | "buyer" | "seller";
@@ -62,12 +63,21 @@ export async function resolveDispute(
   if (isFinancialOrder(order)) {
     // Remboursement = opération Refund distincte ; reversement vendeur = son propre Payout.
     // Les transferts sont exécutés ensuite par le worker, indépendamment.
-    await resolveFinancialDispute(order, outcome, { buyerPercent, actorId: opts.actorId, disputeId: d._id });
+    // Statut avant le litige : le colis avait-il déjà été remis au client ?
+    const before = [...(order.timeline || [])].reverse().find((t: any) => t.status !== "DISPUTED")?.status || "PREPARING";
+    const handedOver = Boolean(order.buyerConfirmedAt) || before === "DELIVERED";
+    await resolveFinancialDispute(order, outcome, { buyerPercent, actorId: opts.actorId, disputeId: d._id, handedOver });
     if (outcome === "release_seller" || outcome === "partial_refund") {
-      order.status = "DELIVERED";
-      order.timeline.push({ status: "DELIVERED", at: new Date(), note: "Litige tranché — reversement vendeur planifié" });
+      // Colis non remis : la commande reprend son cours (préparation, livraison, réception).
+      order.status = handedOver ? "DELIVERED" : before;
+      order.timeline.push({
+        status: order.status,
+        at: new Date(),
+        note: handedOver ? "Litige tranché — reversement vendeur planifié" : "Litige tranché — la livraison reprend",
+      });
       await order.save();
     }
+    await refreshParentOrderStatus(order.parentOrderId);
   } else if (["held", "payout_pending", "refund_pending"].includes(String(order.escrowStatus))) {
     // Ancienne commande dont l'argent n'est pas dans le système Chap Chap Pay.
     throw legacyOrderError();

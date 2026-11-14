@@ -9,6 +9,7 @@ import { env } from "./config/env.js";
 import { errorHandler } from "./middleware/errors.js";
 import { requestLogger } from "./middleware/request-logger.js";
 import { maintenanceGuard } from "./middleware/maintenance.js";
+import { clearPublicCache, publicCache } from "./middleware/public-cache.js";
 import { authRouter } from "./modules/auth.js";
 import { meRouter, orgRouter } from "./modules/me.js";
 import { catalogRouter } from "./modules/catalog.js";
@@ -117,8 +118,19 @@ export function createApp() {
   });
   app.use("/api/v1/me", meRouter);
   app.use("/api/v1/organizations", orgRouter);
-  app.use("/api/v1/catalog", catalogRouter);
-  app.use("/api/v1/listings", listingsRouter);
+  // Toute écriture qui touche le catalogue (annonces, boutiques, admin, commandes/stock) vide le
+  // micro-cache : l'auteur voit sa modification tout de suite, les autres au plus tard après 15 s.
+  app.use(["/api/v1/catalog", "/api/v1/listings", "/api/v1/admin", "/api/v1/me", "/api/v1/checkout"], (req, res, next) => {
+    if (req.method !== "GET") res.on("finish", () => res.statusCode < 400 && clearPublicCache());
+    next();
+  });
+  // Lectures publiques : partagées par tous sauf la liste des boutiques (« aimée par moi »).
+  app.use("/api/v1/catalog", publicCache(15_000, { userIndependent: (req) => req.path !== "/shops" }), catalogRouter);
+  app.use(
+    "/api/v1/listings",
+    publicCache(15_000, { userIndependent: (req) => req.path === "/" && !req.query.mine && !req.query.sellerId }),
+    listingsRouter
+  );
   app.use("/api/v1/sellers", reviewsRouter);
   app.use("/api/v1/cart", cartRouter);
   app.use("/api/v1/checkout", checkoutRouter);

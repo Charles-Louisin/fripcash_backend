@@ -14,7 +14,8 @@
     "ccp:check": "tsx scripts/ccp-live-check.ts",
     "db:local": "tsx scripts/local-replset.ts",
     "test": "node --import tsx --test --test-concurrency=1 test/*.test.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "seed:demo": "tsx scripts/seed-demo.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",

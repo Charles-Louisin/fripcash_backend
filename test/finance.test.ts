@@ -455,10 +455,28 @@ describe("Scénarios obligatoires", () => {
     assert.equal(b!.hold!.active, true);
 
     // Décision : le vendeur est payé, sans toucher aux autres.
-    await delivery.resolveFinancialDispute(await Order.findById(orders[1]!._id), "release_seller", { buyerPercent: 0, actorId: String(buyer._id), disputeId: dispute._id });
+    await delivery.resolveFinancialDispute(await Order.findById(orders[1]!._id), "release_seller", { buyerPercent: 0, actorId: String(buyer._id), disputeId: dispute._id, handedOver: true });
     await drainOutbox("w1");
     assert.equal((await payoutOf(orders[1]!._id))!.status, "succeeded");
     assert.equal(fake.pushCalls.length, 3);
+  });
+
+  test("10 bis — partage d'un litige avant livraison : la part vendeur attend la réception du colis", async () => {
+    const { orders, buyer } = await paidMarketplaceOrder();
+    const dispute = await Dispute.create({ orderId: orders[2]!._id, openedBy: buyer._id, openerRole: "buyer", reason: "Retard" });
+    await delivery.holdForDispute(orders[2]!._id, dispute._id, "Retard");
+    await delivery.resolveFinancialDispute(await Order.findById(orders[2]!._id), "partial_refund", {
+      buyerPercent: 40, actorId: String(buyer._id), disputeId: dispute._id, handedOver: false,
+    });
+    await drainOutbox("w1");
+    assert.equal(await payoutOf(orders[2]!._id), null, "colis jamais livré : rien pour le vendeur");
+    assert.equal((await F.Payout.findOne({ beneficiaryType: "buyer" }))!.amount, 10_000, "40 % de 20 000 + 40 % de 5 000");
+    await Dispute.updateOne({ _id: dispute._id }, { $set: { status: "resolved" } });
+    await receive(orders[2], buyer);
+    await drainOutbox("w1");
+    const p = (await payoutOf(orders[2]!._id))!;
+    assert.equal(p.status, "succeeded");
+    assert.equal(p.amount, 12_000, "60 % du net, versé à la réception");
   });
 
   test("11 — remboursement d'une sous-commande : traçable, sans effacer l'historique", async () => {

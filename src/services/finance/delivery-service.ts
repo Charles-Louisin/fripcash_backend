@@ -190,7 +190,7 @@ export async function holdForDispute(sellerOrderId: unknown, disputeId: unknown,
 export async function resolveFinancialDispute(
   order: any,
   outcome: "refund_buyer" | "release_seller" | "partial_refund",
-  opts2: { buyerPercent: number; actorId: string; disputeId: unknown }
+  opts2: { buyerPercent: number; actorId: string; disputeId: unknown; handedOver: boolean }
 ) {
   const ratio = outcome === "refund_buyer" ? 1 : outcome === "release_seller" ? 0 : opts2.buyerPercent / 100;
   await withTransaction(async (session) => {
@@ -208,13 +208,14 @@ export async function resolveFinancialDispute(
     }
     await releaseSellerOrderHold(order._id, `Litige tranché (${outcome})`, session);
   });
-  if (ratio < 1) {
+  // Colis déjà remis : la part restante du vendeur est due maintenant. Sinon, elle attend la
+  // réception comme toute commande (jamais de reversement pour un colis jamais livré).
+  if (ratio < 1 && opts2.handedOver) {
     const allocation = await sellerAllocationFor(order._id, null);
     if (allocation?.status === "funded") {
       await withTransaction((session) => markAllocationEligible(allocation._id, `Litige tranché (${outcome})`, session));
     }
   }
-  await refreshParentOrderStatus(order.parentOrderId);
 }
 
 /** Remboursement hors litige (vendeur qui annule, offre refusée…). */
